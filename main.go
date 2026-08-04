@@ -108,6 +108,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateViewport()
 
 	case tea.KeyMsg:
+		// Check for bracketed paste first — pasted text arrives as a KeyMsg
+		// with .Paste == true in bubbletea v1.3.10 (enabled by default).
+		if msg.Paste {
+			if !m.isWaiting {
+				m.textarea.InsertString(msg.String())
+			}
+			break
+		}
+
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			return m, tea.Quit
@@ -258,6 +267,7 @@ func main() {
 		initialModel(client, chat),
 		tea.WithAltScreen(),       // Use full terminal buffer
 		tea.WithMouseCellMotion(), // Allow mouse scroll
+		// Note: bracketed paste is enabled by default in bubbletea v1.3.10
 	)
 
 	if _, err := p.Run(); err != nil {
