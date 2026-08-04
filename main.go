@@ -39,11 +39,11 @@ type model struct {
 
 func initialModel(client *genai.Client, chat *genai.Chat) model {
 	ta := textarea.New()
-	ta.Placeholder = "Type a message... (Ctrl+S or Enter to send)"
+	ta.Placeholder = "Type a message... (Enter for new line · Ctrl+S to send)"
 	ta.Focus()
 	ta.CharLimit = 1000000 // High buffer limit similar to 1MB scanner
 	ta.SetWidth(80)
-	ta.SetHeight(3)
+	ta.SetHeight(5)
 
 	vp := viewport.New(80, 20)
 
@@ -95,7 +95,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 		headerHeight := 1
-		footerHeight := 5
+		footerHeight := 7 // textarea (5 lines) + borders + padding
 		m.viewport.Width = msg.Width
 		m.viewport.Height = msg.Height - headerHeight - footerHeight
 		m.textarea.SetWidth(msg.Width)
@@ -112,8 +112,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlC:
 			return m, tea.Quit
 
-		case tea.KeyEnter:
-			// Send message on Enter (or use Ctrl+S if you prefer multi-line input)
+		case tea.KeyCtrlS:
+			// Ctrl+S sends the message; Enter inserts a newline (handled by textarea)
 			if m.isWaiting {
 				return m, nil
 			}
