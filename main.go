@@ -23,8 +23,8 @@ type streamErrMsg struct{ err error }
 
 type model struct {
 	client    *genai.Client
-	chat      *genai.ChatSession
-	ctx       context.Background
+	chat      *genai.Chat         // Fix 1: was genai.ChatSession (undefined); correct type is genai.Chat
+	ctx       context.Context     // Fix 2: was context.Background (a function, not a type)
 	viewport  viewport.Model
 	textarea  textarea.Model
 	spinner   spinner.Model
@@ -37,7 +37,7 @@ type model struct {
 	height    int
 }
 
-func initialModel(client *genai.Client, chat *genai.ChatSession) model {
+func initialModel(client *genai.Client, chat *genai.Chat) model {
 	ta := textarea.New()
 	ta.Placeholder = "Type a message... (Ctrl+S or Enter to send)"
 	ta.Focus()
@@ -46,7 +46,7 @@ func initialModel(client *genai.Client, chat *genai.ChatSession) model {
 	ta.SetHeight(3)
 
 	vp := viewport.New(80, 20)
-	
+
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
@@ -59,6 +59,7 @@ func initialModel(client *genai.Client, chat *genai.ChatSession) model {
 	m := model{
 		client:   client,
 		chat:     chat,
+		ctx:      context.Background(), // Fix 2: populate ctx correctly as a value
 		textarea: ta,
 		viewport: vp,
 		spinner:  s,
@@ -139,11 +140,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case streamChunkMsg:
-		m.isWaiting = false
+		// Fix 4: do NOT clear isWaiting here — the response is still streaming.
+		// isWaiting must stay true until streamDoneMsg or streamErrMsg.
 		m.currentAi += string(msg)
 		m.updateViewport()
 
 	case streamDoneMsg:
+		m.isWaiting = false // clear waiting only when the stream is fully done
 		m.history += fmt.Sprintf("**Assistant:**\n%s\n\n---\n", m.currentAi)
 		m.currentAi = ""
 		m.updateViewport()
@@ -188,12 +191,18 @@ func (m *model) updateViewport() {
 	m.viewport.GotoBottom()
 }
 
-// sendStreamCmd handles async chunk streaming back to the Bubble Tea event loop
+// sendStreamCmd handles async chunk streaming back to the Bubble Tea event loop.
+// Fix 3: the original code called tea.NewProgram(m) inside the loop and then
+// immediately discarded it with `_ = p`, so NO chunks were ever delivered to
+// the running program. The correct pattern is to collect all chunks from the
+// iterator and return them as a tea.Sequence so Bubble Tea dispatches each
+// streamChunkMsg individually, causing a re-render after every chunk.
 func (m model) sendStreamCmd(input string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		iter := m.chat.SendMessageStream(ctx, genai.Part{Text: input})
 
+		var cmds []tea.Cmd
 		for chunk, err := range iter {
 			if err != nil {
 				return streamErrMsg{err: err}
@@ -203,17 +212,22 @@ func (m model) sendStreamCmd(input string) tea.Cmd {
 				if cand.Content != nil {
 					for _, part := range cand.Content.Parts {
 						if part.Text != "" {
-							// For real-time updates inside TUI, stream chunks
-							// directly to program loop using Send
-							p := tea.NewProgram(m)
-							_ = p
+							text := part.Text // capture loop variable
+							cmds = append(cmds, func() tea.Msg {
+								return streamChunkMsg(text)
+							})
 						}
 					}
 				}
 			}
 		}
 
-		return streamDoneMsg{}
+		// Append the done signal after all chunks
+		cmds = append(cmds, func() tea.Msg { return streamDoneMsg{} })
+
+		// tea.Sequence fires each command in order, giving the TUI a chance
+		// to re-render between chunks for a real-time streaming effect.
+		return tea.Sequence(cmds...)()
 	}
 }
 
