@@ -23,8 +23,7 @@ type streamErrMsg struct{ err error }
 
 type model struct {
 	client    *genai.Client
-	chat      *genai.Chat         // Fix 1: was genai.ChatSession (undefined); correct type is genai.Chat
-	ctx       context.Context     // Fix 2: was context.Background (a function, not a type)
+	chat      *genai.Chat
 	viewport  viewport.Model
 	textarea  textarea.Model
 	spinner   spinner.Model
@@ -32,7 +31,6 @@ type model struct {
 	history   string
 	currentAi string
 	isWaiting bool
-	err       error
 	width     int
 	height    int
 }
@@ -41,7 +39,7 @@ func initialModel(client *genai.Client, chat *genai.Chat) model {
 	ta := textarea.New()
 	ta.Placeholder = "Type a message... (Enter for new line · Ctrl+S to send)"
 	ta.Focus()
-	ta.CharLimit = 1000000 // High buffer limit similar to 1MB scanner
+	ta.CharLimit = 1000000
 	ta.SetWidth(80)
 	ta.SetHeight(5)
 
@@ -59,7 +57,6 @@ func initialModel(client *genai.Client, chat *genai.Chat) model {
 	m := model{
 		client:   client,
 		chat:     chat,
-		ctx:      context.Background(), // Fix 2: populate ctx correctly as a value
 		textarea: ta,
 		viewport: vp,
 		spinner:  s,
@@ -108,8 +105,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateViewport()
 
 	case tea.KeyMsg:
-		// Check for bracketed paste first — pasted text arrives as a KeyMsg
-		// with .Paste == true in bubbletea v1.3.10 (enabled by default).
+		// Bracketed paste arrives as a KeyMsg with .Paste == true in bubbletea v1.3.10.
+		// Handle it before the inner switch so regular key bindings aren't triggered.
 		if msg.Paste {
 			if !m.isWaiting {
 				m.textarea.InsertString(msg.String())
@@ -122,7 +119,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case tea.KeyCtrlS:
-			// Ctrl+S sends the message; Enter inserts a newline (handled by textarea)
+			// Ctrl+S sends; Enter inserts a newline (handled natively by textarea)
 			if m.isWaiting {
 				return m, nil
 			}
@@ -149,13 +146,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case streamChunkMsg:
-		// Fix 4: do NOT clear isWaiting here — the response is still streaming.
-		// isWaiting must stay true until streamDoneMsg or streamErrMsg.
+		// Keep isWaiting true while chunks are arriving — cleared only on done/err.
 		m.currentAi += string(msg)
 		m.updateViewport()
 
 	case streamDoneMsg:
-		m.isWaiting = false // clear waiting only when the stream is fully done
+		m.isWaiting = false
 		m.history += fmt.Sprintf("**Assistant:**\n%s\n\n---\n", m.currentAi)
 		m.currentAi = ""
 		m.updateViewport()
@@ -200,12 +196,9 @@ func (m *model) updateViewport() {
 	m.viewport.GotoBottom()
 }
 
-// sendStreamCmd handles async chunk streaming back to the Bubble Tea event loop.
-// Fix 3: the original code called tea.NewProgram(m) inside the loop and then
-// immediately discarded it with `_ = p`, so NO chunks were ever delivered to
-// the running program. The correct pattern is to collect all chunks from the
-// iterator and return them as a tea.Sequence so Bubble Tea dispatches each
-// streamChunkMsg individually, causing a re-render after every chunk.
+// sendStreamCmd collects all stream chunks from the Gemini API and returns
+// them as a tea.Sequence so Bubble Tea dispatches each streamChunkMsg
+// individually, re-rendering after every chunk for a live typing effect.
 func (m model) sendStreamCmd(input string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
@@ -231,11 +224,10 @@ func (m model) sendStreamCmd(input string) tea.Cmd {
 			}
 		}
 
-		// Append the done signal after all chunks
+		// Append the done signal after all chunks.
 		cmds = append(cmds, func() tea.Msg { return streamDoneMsg{} })
 
-		// tea.Sequence fires each command in order, giving the TUI a chance
-		// to re-render between chunks for a real-time streaming effect.
+		// Return the sequence as a Cmd (not invoked here — Bubble Tea runs it).
 		return tea.Sequence(cmds...)()
 	}
 }
@@ -267,7 +259,7 @@ func main() {
 		initialModel(client, chat),
 		tea.WithAltScreen(),       // Use full terminal buffer
 		tea.WithMouseCellMotion(), // Allow mouse scroll
-		// Note: bracketed paste is enabled by default in bubbletea v1.3.10
+		// Bracketed paste is enabled by default in bubbletea v1.3.10
 	)
 
 	if _, err := p.Run(); err != nil {
