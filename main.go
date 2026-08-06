@@ -47,9 +47,63 @@ type model struct {
 	providerName   string
 }
 
+func parseLastCodeBlock(markdown string) string {
+	lines := strings.Split(markdown, "\n")
+	var codeBlocks []string
+	var currentBlock []string
+	inBlock := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			if inBlock {
+				codeBlocks = append(codeBlocks, strings.Join(currentBlock, "\n"))
+				currentBlock = nil
+				inBlock = false
+			} else {
+				inBlock = true
+			}
+		} else if inBlock {
+			currentBlock = append(currentBlock, line)
+		}
+	}
+
+	if inBlock && len(currentBlock) > 0 {
+		codeBlocks = append(codeBlocks, strings.Join(currentBlock, "\n"))
+	}
+
+	if len(codeBlocks) == 0 {
+		return ""
+	}
+	return codeBlocks[len(codeBlocks)-1]
+}
+
+func (m model) copyToClipboard(text string, successMsg string) model {
+	if text == "" {
+		m.copyStatus = "Nothing to copy."
+		return m
+	}
+
+	err := clipboard.WriteAll(text)
+	seq := osc52.New(text)
+	fmt.Print(seq.String())
+
+	if err != nil {
+		fileErr := os.WriteFile("last_response.txt", []byte(text), 0644)
+		if fileErr != nil {
+			m.copyStatus = "Failed to copy: " + err.Error() + " (failed to write last_response.txt)"
+		} else {
+			m.copyStatus = "Clipboard util missing. Copied via OSC52 & saved to last_response.txt!"
+		}
+	} else {
+		m.copyStatus = successMsg
+	}
+	return m
+}
+
 func initialModel(client *genai.Client, chat *genai.Chat, groqClient *openai.Client, groqModel string) model {
 	ta := textarea.New()
-	ta.Placeholder = "Type a message... (Enter: newline · Ctrl+S: send · Ctrl+Y: copy last AI)"
+	ta.Placeholder = "Type a message... (Ctrl+S: send · Ctrl+Y/K: copy AI/code · Esc: normal mode)"
 	ta.Focus()
 	ta.CharLimit = 1000000
 	ta.SetWidth(80)
@@ -112,32 +166,51 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			break
 		}
+
+		if !m.textarea.Focused() {
+			switch msg.String() {
+			case "c":
+				code := parseLastCodeBlock(m.lastAiResponse)
+				if code != "" {
+					m = m.copyToClipboard(code, "Copied last code block to clipboard!")
+				} else {
+					m.copyStatus = "No code blocks found in the last response."
+				}
+				return m, nil
+			case "y":
+				m = m.copyToClipboard(m.lastAiResponse, "Copied last AI response to clipboard!")
+				return m, nil
+			case "i", "a":
+				m.textarea.Focus()
+				m.copyStatus = ""
+				return m, nil
+			}
+		}
+
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			return m, tea.Quit
 
-		case tea.KeyCtrlY:
-			if m.lastAiResponse != "" {
-				// 1. Try standard clipboard utility
-				err := clipboard.WriteAll(m.lastAiResponse)
-
-				// 2. Try terminal ESC sequence (OSC 52)
-				seq := osc52.New(m.lastAiResponse)
-				fmt.Print(seq.String())
-
-				if err != nil {
-					// 3. Fallback: Save to file
-					fileErr := os.WriteFile("last_response.txt", []byte(m.lastAiResponse), 0644)
-					if fileErr != nil {
-						m.copyStatus = "Failed to copy: " + err.Error() + " (failed to write last_response.txt)"
-					} else {
-						m.copyStatus = "Clipboard util missing. Copied via OSC52 & saved to last_response.txt!"
-					}
-				} else {
-					m.copyStatus = "Copied last AI response to clipboard!"
-				}
+		case tea.KeyEsc:
+			if m.textarea.Focused() {
+				m.textarea.Blur()
+				m.copyStatus = "Normal mode: 'c' to copy code, 'y' to copy response, 'i' to resume typing"
 			} else {
-				m.copyStatus = "No AI response to copy yet."
+				m.textarea.Focus()
+				m.copyStatus = ""
+			}
+			return m, nil
+
+		case tea.KeyCtrlY:
+			m = m.copyToClipboard(m.lastAiResponse, "Copied last AI response to clipboard!")
+			return m, nil
+
+		case tea.KeyCtrlK:
+			code := parseLastCodeBlock(m.lastAiResponse)
+			if code != "" {
+				m = m.copyToClipboard(code, "Copied last code block to clipboard!")
+			} else {
+				m.copyStatus = "No code blocks found in the last response."
 			}
 			return m, nil
 
