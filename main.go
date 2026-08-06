@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -27,25 +28,27 @@ type streamDoneMsg struct{}
 type streamErrMsg struct{ err error }
 
 type model struct {
-	client       *genai.Client
-	chat         *genai.Chat
-	groqClient   *openai.Client
-	groqModel    string
-	viewport     viewport.Model
-	textarea     textarea.Model
-	spinner      spinner.Model
-	glamour      *glamour.TermRenderer
-	history      string
-	currentAi    string
-	isWaiting    bool
-	width        int
-	height       int
-	providerName string
+	client         *genai.Client
+	chat           *genai.Chat
+	groqClient     *openai.Client
+	groqModel      string
+	viewport       viewport.Model
+	textarea       textarea.Model
+	spinner        spinner.Model
+	glamour        *glamour.TermRenderer
+	history        string
+	currentAi      string
+	lastAiResponse string
+	copyStatus     string
+	isWaiting      bool
+	width          int
+	height         int
+	providerName   string
 }
 
 func initialModel(client *genai.Client, chat *genai.Chat, groqClient *openai.Client, groqModel string) model {
 	ta := textarea.New()
-	ta.Placeholder = "Type a message... (Enter for new line · Ctrl+S to send)"
+	ta.Placeholder = "Type a message... (Enter: newline · Ctrl+S: send · Ctrl+Y: copy last AI)"
 	ta.Focus()
 	ta.CharLimit = 1000000
 	ta.SetWidth(80)
@@ -100,34 +103,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		spCmd tea.Cmd
 	)
 
-	m.textarea, tiCmd = m.textarea.Update(msg)
-	m.viewport, vpCmd = m.viewport.Update(msg)
-
-	if m.isWaiting {
-		m.spinner, spCmd = m.spinner.Update(msg)
-	}
-
 	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-
-		headerHeight := 1
-		footerHeight := 7 // textarea (5 lines) + borders + padding
-		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - headerHeight - footerHeight
-		m.textarea.SetWidth(msg.Width)
-
-		renderer, _ := glamour.NewTermRenderer(
-			glamour.WithAutoStyle(),
-			glamour.WithWordWrap(msg.Width-4),
-		)
-		m.glamour = renderer
-		m.updateViewport()
-
 	case tea.KeyMsg:
-		// Bracketed paste arrives as a KeyMsg with .Paste == true in bubbletea v1.3.10.
-		// Handle it before the inner switch so regular key bindings aren't triggered.
 		if msg.Paste {
 			if !m.isWaiting {
 				m.textarea.InsertString(msg.String())
@@ -137,6 +114,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			return m, tea.Quit
+
+		case tea.KeyCtrlY:
+			if m.lastAiResponse != "" {
+				err := clipboard.WriteAll(m.lastAiResponse)
+				if err != nil {
+					m.copyStatus = "Failed to copy: " + err.Error()
+				} else {
+					m.copyStatus = "Copied last AI response to clipboard!"
+				}
+			} else {
+				m.copyStatus = "No AI response to copy yet."
+			}
+			return m, nil
 
 		case tea.KeyCtrlS:
 			// Ctrl+S sends; Enter inserts a newline (handled natively by textarea)
@@ -156,6 +146,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.history += fmt.Sprintf("**You:** %s\n\n", input)
 			m.currentAi = ""
 			m.isWaiting = true
+			m.copyStatus = ""
 			m.updateViewport()
 
 			return m, tea.Batch(
@@ -164,6 +155,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sendStreamCmd(input),
 			)
 		}
+	}
+
+	m.textarea, tiCmd = m.textarea.Update(msg)
+	m.viewport, vpCmd = m.viewport.Update(msg)
+
+	if m.isWaiting {
+		m.spinner, spCmd = m.spinner.Update(msg)
+	}
+
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+
+		headerHeight := 1
+		footerHeight := 8 // textarea (5 lines) + borders + padding + status line
+		m.viewport.Width = msg.Width
+		m.viewport.Height = msg.Height - headerHeight - footerHeight
+		m.textarea.SetWidth(msg.Width)
+
+		renderer, _ := glamour.NewTermRenderer(
+			glamour.WithAutoStyle(),
+			glamour.WithWordWrap(msg.Width-4),
+		)
+		m.glamour = renderer
+		m.updateViewport()
 
 	case streamChunkMsg:
 		// Keep isWaiting true while chunks are arriving — cleared only on done/err.
@@ -173,6 +190,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamDoneMsg:
 		m.isWaiting = false
 		m.history += fmt.Sprintf("**Assistant:**\n%s\n\n---\n", m.currentAi)
+		m.lastAiResponse = m.currentAi
 		m.currentAi = ""
 		m.updateViewport()
 
@@ -194,10 +212,16 @@ func (m model) View() string {
 		footerView = m.textarea.View()
 	}
 
+	var statusLine string
+	if m.copyStatus != "" {
+		statusLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render(m.copyStatus)
+	}
+
 	return fmt.Sprintf(
-		"%s\n\n%s",
+		"%s\n\n%s%s",
 		m.viewport.View(),
 		footerView,
+		statusLine,
 	)
 }
 
