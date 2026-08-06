@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/atotto/clipboard"
+	osc52 "github.com/aymanbagabas/go-osc52/v2"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -117,9 +118,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case tea.KeyCtrlY:
 			if m.lastAiResponse != "" {
+				// 1. Try standard clipboard utility
 				err := clipboard.WriteAll(m.lastAiResponse)
+
+				// 2. Try terminal ESC sequence (OSC 52)
+				seq := osc52.New(m.lastAiResponse)
+				fmt.Print(seq.String())
+
 				if err != nil {
-					m.copyStatus = "Failed to copy: " + err.Error()
+					// 3. Fallback: Save to file
+					fileErr := os.WriteFile("last_response.txt", []byte(m.lastAiResponse), 0644)
+					if fileErr != nil {
+						m.copyStatus = "Failed to copy: " + err.Error() + " (failed to write last_response.txt)"
+					} else {
+						m.copyStatus = "Clipboard util missing. Copied via OSC52 & saved to last_response.txt!"
+					}
 				} else {
 					m.copyStatus = "Copied last AI response to clipboard!"
 				}
