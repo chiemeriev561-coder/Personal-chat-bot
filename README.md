@@ -78,7 +78,7 @@ Example (run API server and call completion):
 
 ```bash
 # Start API server (default :8080)
-GEMINI_API_KEY=... go run main.go --api
+GEMINI_API_KEY=... go run . --api
 
 # Request a completion
 curl -X POST -H "Content-Type: application/json" \
