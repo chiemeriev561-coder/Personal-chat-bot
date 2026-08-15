@@ -1,12 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/sashabaranov/go-openai"
+
+	"personalchatbot/provider"
 )
 
 // Minimal OpenAI-compatible request types (subset)
@@ -25,6 +31,18 @@ type ChatCompletionRequest struct {
 func startServer(addr string) {
 	if addr == "" {
 		addr = ":8080"
+	}
+
+	// Optionally initialize an NVIDIA provider if environment vars are set.
+	var prov provider.Provider
+	if os.Getenv("NVIDIA_API_KEY") != "" && os.Getenv("NVIDIA_API_BASE") != "" {
+		p, err := provider.NewNvidiaProviderFromEnv()
+		if err != nil {
+			log.Printf("failed to init NVIDIA provider: %v", err)
+		} else {
+			prov = p
+			log.Printf("NVIDIA provider initialized")
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -48,7 +66,49 @@ func startServer(addr string) {
 			return
 		}
 
-		// Simple echo-style reply for now. Integration with provider layer will replace this.
+		// If an NVIDIA provider is configured, call it (non-streaming). Otherwise fall back to echo.
+		if prov != nil {
+			// translate to go-openai request
+			openReq := openai.ChatCompletionRequest{
+				Model: req.Model,
+			}
+			for _, m := range req.Messages {
+				openReq.Messages = append(openReq.Messages, openai.ChatCompletionMessage{Role: m.Role, Content: m.Content})
+			}
+
+			resp, err := prov.CreateChatCompletion(context.Background(), openReq)
+			if err != nil {
+				http.Error(w, "provider error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			// Map provider response to OpenAI-compatible response body
+			out := map[string]interface{}{
+				"id":      resp.ID,
+				"object":  resp.Object,
+				"created": resp.Created,
+				"choices": []map[string]interface{}{},
+				"usage":   resp.Usage,
+			}
+			for i, ch := range resp.Choices {
+				choice := map[string]interface{}{
+					"index": i,
+					"message": map[string]string{
+						"role":    ch.Message.Role,
+						"content": ch.Message.Content,
+					},
+					"finish_reason": ch.FinishReason,
+				}
+				out["choices"] = append(out["choices"].([]map[string]interface{}), choice)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(out)
+			return
+		}
+
+		// Simple echo-style reply when no provider is configured.
 		userContent := ""
 		if len(req.Messages) > 0 {
 			// prefer the last user message
@@ -87,7 +147,7 @@ func startServer(addr string) {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 
-	// SSE streaming endpoint — simple demo stream that emits a few chunks and ends.
+	// SSE streaming endpoint — uses provider streaming if available, otherwise demo stream.
 	mux.HandleFunc("/v1/chat/stream", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -110,6 +170,49 @@ func startServer(addr string) {
 			return
 		}
 
+		// If provider supports streaming, forward a streaming chat completion as SSE.
+		if prov != nil {
+			// For GET-based demo, convert query message into a single user message and call the provider stream.
+			openReq := openai.ChatCompletionRequest{
+				Model: "gpt-4o-mini", // default model name; provider may ignore or require a specific one
+				Messages: []openai.ChatCompletionMessage{
+					{Role: "user", Content: msg},
+				},
+				Stream: true,
+			}
+
+			stream, err := prov.CreateChatCompletionStream(context.Background(), openReq)
+			if err != nil {
+				http.Error(w, "provider stream error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer stream.Close()
+
+			for {
+				resp, err := stream.Recv()
+				if err != nil {
+					if err == io.EOF {
+						break
+					}
+					fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+					flusher.Flush()
+					return
+				}
+				for _, choice := range resp.Choices {
+					if choice.Delta.Content != "" {
+						fmt.Fprintf(w, "data: %s\n\n", choice.Delta.Content)
+						flusher.Flush()
+					}
+				}
+			}
+
+			// close marker
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			flusher.Flush()
+			return
+		}
+
+		// Fallback demo stream
 		chunks := []string{
 			"Starting stream...",
 			msg,
