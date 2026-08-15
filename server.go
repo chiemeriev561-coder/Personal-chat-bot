@@ -36,7 +36,7 @@ type ChatCompletionRequest struct {
 }
 
 // default model
-var defaultModel = "gemini"
+var defaultModel = "NVIDIA"
 
 // simple in-memory (and on-disk) history store
 type HistoryStore struct {

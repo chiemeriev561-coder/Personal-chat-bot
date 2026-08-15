@@ -400,7 +400,8 @@ func main() {
 	}
 	selectedModel = strings.ToLower(selectedModel)
 	if selectedModel == "" {
-		selectedModel = "gemini"
+		selectedModel = "NVIDIA" // Default to NVIDIA if no model specified
+	
 	}
 
 	var groqModel string
