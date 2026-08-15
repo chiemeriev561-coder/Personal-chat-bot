@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/sashabaranov/go-openai"
 )
@@ -31,6 +32,11 @@ func NewNvidiaProviderFromEnv() (*NvidiaProvider, error) {
 	if base == "" {
 		// sensible default for NVIDIA's OpenAI-compatible endpoint
 		base = "https://integrate.api.nvidia.com/v1"
+	}
+	base = strings.TrimRight(base, "/")
+	base = strings.TrimSuffix(base, "/chat/completions")
+	if base == "https://integrate.api.nvidia.com" {
+		base += "/v1"
 	}
 	cfg := openai.DefaultConfig(apiKey)
 	cfg.BaseURL = base
