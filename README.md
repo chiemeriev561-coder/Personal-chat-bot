@@ -38,7 +38,7 @@ CHAT_MODEL="gemini" # Default model. Set to "groq" to use Groq by default.
 Build the executable:
 
 ```bash
-go build -o personalchatbot main.go
+go build -o personalchatbot .
 ```
 
 ---
