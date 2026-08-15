@@ -40,7 +40,7 @@ func startServer(addr string) {
 		addr = ":8080"
 	}
 
-	// Optionally initialize an NVIDIA provider if environment vars are set.
+	// Provider selection priority: NVIDIA -> Groq -> Gemini
 	var prov provider.Provider
 	if os.Getenv("NVIDIA_API_KEY") != "" && os.Getenv("NVIDIA_API_BASE") != "" {
 		p, err := provider.NewNvidiaProviderFromEnv()
@@ -49,6 +49,24 @@ func startServer(addr string) {
 		} else {
 			prov = p
 			log.Printf("NVIDIA provider initialized")
+		}
+	}
+	if prov == nil && os.Getenv("GROQ_API_KEY") != "" {
+		p, err := provider.NewGroqProviderFromEnv()
+		if err != nil {
+			log.Printf("failed to init Groq provider: %v", err)
+		} else {
+			prov = p
+			log.Printf("Groq provider initialized")
+		}
+	}
+	if prov == nil && (os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "") {
+		p, err := provider.NewGeminiProviderFromEnv()
+		if err != nil {
+			log.Printf("failed to init Gemini provider: %v", err)
+		} else {
+			prov = p
+			log.Printf("Gemini provider initialized")
 		}
 	}
 
