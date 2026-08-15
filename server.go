@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/sashabaranov/go-openai"
@@ -32,6 +33,66 @@ type ChatCompletionRequest struct {
 	PresencePenalty  float32       `json:"presence_penalty,omitempty"`
 	FrequencyPenalty float32       `json:"frequency_penalty,omitempty"`
 	Stream           bool          `json:"stream,omitempty"`
+}
+
+// default model
+var defaultModel = "gemini"
+
+// simple in-memory (and on-disk) history store
+type HistoryStore struct {
+	mu   sync.Mutex
+	data map[string][]ChatMessage
+	file string
+}
+
+func NewHistoryStore(file string) *HistoryStore {
+	hs := &HistoryStore{data: make(map[string][]ChatMessage), file: file}
+	if b, err := os.ReadFile(file); err == nil {
+		_ = json.Unmarshal(b, &hs.data)
+	}
+	return hs
+}
+
+func (hs *HistoryStore) Save() error {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	b, err := json.MarshalIndent(hs.data, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(hs.file, b, 0644)
+}
+
+func (hs *HistoryStore) Get(session string) []ChatMessage {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	return append([]ChatMessage(nil), hs.data[session]...)
+}
+
+func (hs *HistoryStore) Append(session string, msg ChatMessage) error {
+	hs.mu.Lock()
+	hs.data[session] = append(hs.data[session], msg)
+	hs.mu.Unlock()
+	return hs.Save()
+}
+
+var store = NewHistoryStore("history.json")
+
+func requireAuth(w http.ResponseWriter, r *http.Request) bool {
+	// /health is intentionally public
+	if r.URL.Path == "/health" {
+		return true
+	}
+	if token := os.Getenv("API_AUTH_TOKEN"); token == "" {
+		return true
+	} else {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return false
+		}
+	}
+	return true
 }
 
 // Start a simple HTTP API exposing the requested endpoints.
@@ -86,10 +147,20 @@ func startServer(addr string) {
 			return
 		}
 
+		// global auth (except /health)
+		if !requireAuth(w, r) {
+			return
+		}
+
 		var req ChatCompletionRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
+		}
+
+		// default model when not provided
+		if req.Model == "" {
+			req.Model = defaultModel
 		}
 
 		// If stream=true, perform streaming on this endpoint (OpenAI-compatible).
