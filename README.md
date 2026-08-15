@@ -59,11 +59,11 @@ You can override the configured default model by using the `--model` CLI flag:
 # Run using Gemini
 ./personalchatbot --model gemini
 
-# Run using the default Groq model (llama-3.3-70b-versatile)
+# Run using the default Groq model (openai/gpt-oss-20b)
 ./personalchatbot --model groq
 
 # Run using a specific Groq model
-./personalchatbot --model deepseek-r1-distill-llama-70b
+./personalchatbot --model openai/gpt-oss-20b
 ```
 
 ### Controls in TUI

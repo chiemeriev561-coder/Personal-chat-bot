@@ -23,6 +23,8 @@ import (
 	"personalchatbot/provider"
 )
 
+const defaultGroqModel = "openai/gpt-oss-20b"
+
 // Messages for async Bubble Tea updates
 type streamChunkMsg string
 type streamDoneMsg struct{}
@@ -394,7 +396,7 @@ func main() {
 	// Load environment variables from .env file if it exists
 	_ = godotenv.Load()
 
-	modelFlag := flag.String("model", "", "Model to use ('gemini' or specific Groq models like 'llama-3.3-70b-versatile', or 'groq' to use default Groq model)")
+	modelFlag := flag.String("model", "", "Model to use ('gemini' or a specific Groq model like 'openai/gpt-oss-20b', or 'groq' to use the default Groq model)")
 	serverFlag := flag.Bool("api", false, "Start HTTP API server (don't run TUI)")
 	apiAddr := flag.String("api-addr", ":8080", "Address for the HTTP API server (when --api is set)")
 	flag.Parse()
@@ -417,9 +419,10 @@ func main() {
 	}
 
 	var groqModel string
-	if selectedModel == "groq" || strings.HasPrefix(selectedModel, "llama") || strings.HasPrefix(selectedModel, "mixtral") || strings.HasPrefix(selectedModel, "deepseek") {
+	if selectedModel == "groq" || strings.HasPrefix(selectedModel, "llama") || strings.HasPrefix(selectedModel, "mixtral") || strings.HasPrefix(selectedModel, "deepseek") || strings.HasPrefix(selectedModel, "openai/") || strings.HasPrefix(selectedModel, "qwen/") {
 		if selectedModel == "groq" {
-			groqModel = "llama-3.3-70b-versatile"
+			groqModel = defaultGroqModel
+			selectedModel = groqModel
 		} else {
 			groqModel = *modelFlag
 			if groqModel == "" {

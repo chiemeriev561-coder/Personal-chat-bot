@@ -35,6 +35,11 @@ type ChatCompletionRequest struct {
 	Stream           bool          `json:"stream,omitempty"`
 }
 
+func writeSSEData(w http.ResponseWriter, value string) {
+	encoded, _ := json.Marshal(value)
+	fmt.Fprintf(w, "data: %s\n\n", encoded)
+}
+
 // default model
 var defaultModel = "nvidia/nemotron-3.5-lightning-30b-a3b"
 
@@ -264,7 +269,7 @@ func startServer(addr string) {
 						return
 					}
 					if chunk.Content != "" {
-						fmt.Fprintf(w, "data: %s\n\n", chunk.Content)
+						writeSSEData(w, chunk.Content)
 						flusher.Flush()
 					}
 				}
@@ -277,7 +282,7 @@ func startServer(addr string) {
 			// fallback demo stream
 			chunks := []string{"Starting stream...", "(no provider)"}
 			for _, c := range chunks {
-				fmt.Fprintf(w, "data: %s\n\n", c)
+				writeSSEData(w, c)
 				flusher.Flush()
 				time.Sleep(200 * time.Millisecond)
 			}
@@ -434,7 +439,7 @@ func startServer(addr string) {
 					return
 				}
 				if chunk.Content != "" {
-					fmt.Fprintf(w, "data: %s\n\n", chunk.Content)
+					writeSSEData(w, chunk.Content)
 					flusher.Flush()
 				}
 			}
@@ -453,7 +458,7 @@ func startServer(addr string) {
 		}
 
 		for _, c := range chunks {
-			fmt.Fprintf(w, "data: %s\n\n", c)
+			writeSSEData(w, c)
 			flusher.Flush()
 			// small delay to simulate streaming
 			time.Sleep(250 * time.Millisecond)
