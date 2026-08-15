@@ -36,7 +36,7 @@ type ChatCompletionRequest struct {
 }
 
 // default model
-var defaultModel = "NVIDIA"
+var defaultModel = "nvidia/nemotron-3.5-lightning-30b-a3b"
 
 // simple in-memory (and on-disk) history store
 type HistoryStore struct {
