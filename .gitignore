@@ -1,3 +1,11 @@
 .env
 .env.*
 *.local
+
+# Ignore built binaries
+personalchatbot
+victor-bot
+*.exe
+*.dll
+*.so
+*.dylib
