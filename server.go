@@ -22,9 +22,16 @@ type ChatMessage struct {
 }
 
 type ChatCompletionRequest struct {
-	Model    string        `json:"model"`
-	Messages []ChatMessage `json:"messages"`
-	Stream   bool          `json:"stream,omitempty"`
+	Model            string        `json:"model"`
+	Messages         []ChatMessage `json:"messages"`
+	Temperature      float32       `json:"temperature,omitempty"`
+	TopP             float32       `json:"top_p,omitempty"`
+	MaxTokens        int           `json:"max_tokens,omitempty"`
+	N                int           `json:"n,omitempty"`
+	Stop             []string      `json:"stop,omitempty"`
+	PresencePenalty  float32       `json:"presence_penalty,omitempty"`
+	FrequencyPenalty float32       `json:"frequency_penalty,omitempty"`
+	Stream           bool          `json:"stream,omitempty"`
 }
 
 // Start a simple HTTP API exposing the requested endpoints.
@@ -70,7 +77,14 @@ func startServer(addr string) {
 		if prov != nil {
 			// translate to go-openai request
 			openReq := openai.ChatCompletionRequest{
-				Model: req.Model,
+				Model:            req.Model,
+				Temperature:      req.Temperature,
+				TopP:             req.TopP,
+				MaxTokens:        req.MaxTokens,
+				N:                req.N,
+				Stop:             req.Stop,
+				PresencePenalty:  req.PresencePenalty,
+				FrequencyPenalty: req.FrequencyPenalty,
 			}
 			for _, m := range req.Messages {
 				openReq.Messages = append(openReq.Messages, openai.ChatCompletionMessage{Role: m.Role, Content: m.Content})
@@ -94,8 +108,8 @@ func startServer(addr string) {
 				choice := map[string]interface{}{
 					"index": i,
 					"message": map[string]string{
-						"role":    ch.Message.Role,
-						"content": ch.Message.Content,
+						"role":    ch.Role,
+						"content": ch.Content,
 					},
 					"finish_reason": ch.FinishReason,
 				}
