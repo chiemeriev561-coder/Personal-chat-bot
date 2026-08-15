@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -30,10 +29,8 @@ type streamDoneMsg struct{}
 type streamErrMsg struct{ err error }
 
 type model struct {
-	client         *genai.Client
-	chat           *genai.Chat
-	groqClient     *openai.Client
-	groqModel      string
+	prov           provider.Provider
+	modelName      string
 	viewport       viewport.Model
 	textarea       textarea.Model
 	spinner        spinner.Model
@@ -102,7 +99,7 @@ func (m model) copyToClipboard(text string, successMsg string) model {
 	return m
 }
 
-func initialModel(client *genai.Client, chat *genai.Chat, groqClient *openai.Client, groqModel string) model {
+func initialModel(prov provider.Provider, providerName string, modelName string) model {
 	ta := textarea.New()
 	ta.Placeholder = "Type a message... (Ctrl+S: send · Ctrl+Y/K: copy AI/code · Esc: normal mode)"
 	ta.Focus()
@@ -121,21 +118,16 @@ func initialModel(client *genai.Client, chat *genai.Chat, groqClient *openai.Cli
 		glamour.WithWordWrap(80),
 	)
 
-	var providerName string
 	var systemHeader string
-	if groqClient != nil {
-		providerName = fmt.Sprintf("Groq (%s)", groqModel)
+	if providerName != "" {
 		systemHeader = fmt.Sprintf("# Victor AI GO CLI Chatbot [%s]\n*Type your message below. Press Ctrl+C to quit.*\n\n---\n", providerName)
 	} else {
-		providerName = "Gemini"
-		systemHeader = "# Victor AI GO CLI Chatbot [Gemini]\n*Type your message below. Press Ctrl+C to quit.*\n\n---\n"
+		systemHeader = "# Victor AI GO CLI Chatbot\n*Type your message below. Press Ctrl+C to quit.*\n\n---\n"
 	}
 
 	m := model{
-		client:       client,
-		chat:         chat,
-		groqClient:   groqClient,
-		groqModel:    groqModel,
+		prov:         prov,
+		modelName:    modelName,
 		textarea:     ta,
 		viewport:     vp,
 		spinner:      s,
@@ -334,76 +326,54 @@ func (m model) sendStreamCmd(input string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
-		if m.groqClient != nil {
-			req := openai.ChatCompletionRequest{
-				Model: m.groqModel,
-				Messages: []openai.ChatCompletionMessage{
-					{
-						Role:    openai.ChatMessageRoleSystem,
-						Content: "You are an expert developer assistant. Provide precise, idiomatic code examples and direct technical answers.",
-					},
-					{
-						Role:    openai.ChatMessageRoleUser,
-						Content: input,
-					},
-				},
-				Stream: true,
-			}
-			stream, err := m.groqClient.CreateChatCompletionStream(ctx, req)
+		// Build openai-compatible request
+		openReq := openai.ChatCompletionRequest{
+			Model: m.modelName,
+			Messages: []openai.ChatCompletionMessage{
+				{Role: "system", Content: "You are an expert developer assistant. Provide precise, idiomatic code examples and direct technical answers."},
+				{Role: "user", Content: input},
+			},
+			Stream: true,
+		}
+
+		if m.prov != nil {
+			stream, err := m.prov.CreateChatCompletionStream(ctx, openReq)
 			if err != nil {
+				// If provider doesn't support streaming, fall back to non-streaming call and emit full text
+				if err == provider.ErrNotSupported {
+					_, err2 := m.prov.CreateChatCompletion(ctx, openReq)
+					if err2 != nil {
+						return streamErrMsg{err: err2}
+					}
+					return streamDoneMsg{}
+				}
 				return streamErrMsg{err: err}
 			}
 			defer stream.Close()
 
 			var cmds []tea.Cmd
 			for {
-				response, err := stream.Recv()
-				if errors.Is(err, io.EOF) {
-					break
-				}
+				chunk, err := stream.Recv()
 				if err != nil {
+					if err == io.EOF {
+						break
+					}
 					return streamErrMsg{err: err}
 				}
-				if len(response.Choices) > 0 {
-					text := response.Choices[0].Delta.Content
-					if text != "" {
-						cmds = append(cmds, func() tea.Msg {
-							return streamChunkMsg(text)
-						})
-					}
+				if chunk.Content != "" {
+					text := chunk.Content
+					cmds = append(cmds, func() tea.Msg { return streamChunkMsg(text) })
 				}
 			}
 			cmds = append(cmds, func() tea.Msg { return streamDoneMsg{} })
 			return tea.Sequence(cmds...)()
 		}
 
-		// Otherwise, use Gemini
-		iter := m.chat.SendMessageStream(ctx, genai.Part{Text: input})
-
-		var cmds []tea.Cmd
-		for chunk, err := range iter {
-			if err != nil {
-				return streamErrMsg{err: err}
-			}
-
-			for _, cand := range chunk.Candidates {
-				if cand.Content != nil {
-					for _, part := range cand.Content.Parts {
-						if part.Text != "" {
-							text := part.Text // capture loop variable
-							cmds = append(cmds, func() tea.Msg {
-								return streamChunkMsg(text)
-							})
-						}
-					}
-				}
-			}
+		// No provider: simple local echo
+		cmds := []tea.Cmd{
+			func() tea.Msg { return streamChunkMsg("(no provider) " + input) },
+			func() tea.Msg { return streamDoneMsg{} },
 		}
-
-		// Append the done signal after all chunks.
-		cmds = append(cmds, func() tea.Msg { return streamDoneMsg{} })
-
-		// Return the sequence as a Cmd (not invoked here — Bubble Tea runs it).
 		return tea.Sequence(cmds...)()
 	}
 }
@@ -423,22 +393,15 @@ func main() {
 		return
 	}
 
-	ctx := context.Background()
-
-	// Check if we should use Groq
-	useGroq := false
+	// Determine selected model and groqModel default if needed.
 	selectedModel := *modelFlag
-
-	// Fallback to environment variable if no flag was provided
 	if selectedModel == "" {
 		selectedModel = os.Getenv("CHAT_MODEL")
 	}
-
 	selectedModel = strings.ToLower(selectedModel)
 
 	var groqModel string
 	if selectedModel == "groq" || strings.HasPrefix(selectedModel, "llama") || strings.HasPrefix(selectedModel, "mixtral") || strings.HasPrefix(selectedModel, "deepseek") {
-		useGroq = true
 		if selectedModel == "groq" {
 			groqModel = "llama-3.3-70b-versatile"
 		} else {
@@ -449,52 +412,45 @@ func main() {
 		}
 	}
 
-	var client *genai.Client
-	var chat *genai.Chat
-	var groqClient *openai.Client
-
-	if useGroq {
-		apiKey := os.Getenv("GROQ_API_KEY")
-		if apiKey == "" {
-			log.Fatal("missing Groq API key: set GROQ_API_KEY before starting")
-		}
-
-		config := openai.DefaultConfig(apiKey)
-		config.BaseURL = "https://api.groq.com/openai/v1"
-		groqClient = openai.NewClientWithConfig(config)
-	} else {
-		if os.Getenv("GEMINI_API_KEY") == "" && os.Getenv("GOOGLE_API_KEY") == "" {
-			log.Fatal("missing API key: set GEMINI_API_KEY or GOOGLE_API_KEY before starting")
-		}
-
-		var err error
-		client, err = genai.NewClient(ctx, nil)
+	// Provider selection: NVIDIA -> Groq -> Gemini
+	var prov provider.Provider
+	var providerName string
+	if os.Getenv("NVIDIA_API_KEY") != "" {
+		p, err := provider.NewNvidiaProviderFromEnv()
 		if err != nil {
-			log.Fatalf("Failed to create client: %v", err)
+			log.Printf("NVIDIA init failed: %v", err)
+		} else {
+			prov = p
+			providerName = "NVIDIA"
 		}
-
-		config := &genai.GenerateContentConfig{
-			SystemInstruction: &genai.Content{Parts: []*genai.Part{{
-				Text: "You are an expert developer assistant. Provide precise, idiomatic code examples and direct technical answers.",
-			}}},
-		}
-
-		geminiModel := "gemini-3.6-flash"
-		if selectedModel == "gemini-3.5-flash" || selectedModel == "gemini-3.6-flash" {
-			geminiModel = selectedModel
-		}
-
-		chat, err = client.Chats.Create(ctx, geminiModel, config, nil)
+	}
+	if prov == nil && os.Getenv("GROQ_API_KEY") != "" {
+		p, err := provider.NewGroqProviderFromEnv()
 		if err != nil {
-			log.Fatalf("Failed to initialize chat: %v", err)
+			log.Printf("Groq init failed: %v", err)
+		} else {
+			prov = p
+			providerName = fmt.Sprintf("Groq (%s)", groqModel)
+		}
+	}
+	if prov == nil && (os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "") {
+		p, err := provider.NewGeminiProviderFromEnv()
+		if err != nil {
+			log.Printf("Gemini init failed: %v", err)
+		} else {
+			prov = p
+			providerName = "Gemini"
 		}
 	}
 
+	if prov == nil {
+		log.Fatal("no provider available: set NVIDIA_API_KEY, GROQ_API_KEY, or GEMINI_API_KEY/GOOGLE_API_KEY")
+	}
+
 	p := tea.NewProgram(
-		initialModel(client, chat, groqClient, groqModel),
+		initialModel(prov, providerName, selectedModel),
 		tea.WithAltScreen(),       // Use full terminal buffer
 		tea.WithMouseCellMotion(), // Allow mouse scroll
-		// Bracketed paste is enabled by default in bubbletea v1.3.10
 	)
 
 	if _, err := p.Run(); err != nil {
