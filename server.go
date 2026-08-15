@@ -36,7 +36,7 @@ type ChatCompletionRequest struct {
 }
 
 // default model
-var defaultModel = "gemini-3.6-flash"
+var defaultModel = "nvidia/nemotron-3.5-lightning-30b-a3b"
 
 // simple in-memory (and on-disk) history store
 type HistoryStore struct {
@@ -124,9 +124,27 @@ func startServer(addr string) {
 		addr = ":8080"
 	}
 
-	// Gemini is the active provider for now.
+	// Provider selection priority: NVIDIA -> Groq -> Gemini
 	var prov provider.Provider
-	if os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "" {
+	if os.Getenv("NVIDIA_API_KEY") != "" {
+		p, err := provider.NewNvidiaProviderFromEnv()
+		if err != nil {
+			log.Printf("failed to init NVIDIA provider: %v", err)
+		} else {
+			prov = p
+			log.Printf("NVIDIA provider initialized")
+		}
+	}
+	if prov == nil && os.Getenv("GROQ_API_KEY") != "" {
+		p, err := provider.NewGroqProviderFromEnv()
+		if err != nil {
+			log.Printf("failed to init Groq provider: %v", err)
+		} else {
+			prov = p
+			log.Printf("Groq provider initialized")
+		}
+	}
+	if prov == nil && (os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "") {
 		p, err := provider.NewGeminiProviderFromEnv()
 		if err != nil {
 			log.Printf("failed to init Gemini provider: %v", err)
@@ -134,9 +152,6 @@ func startServer(addr string) {
 			prov = p
 			log.Printf("Gemini provider initialized")
 		}
-	}
-	if prov == nil {
-		log.Fatal("Gemini provider unavailable: set GEMINI_API_KEY or GOOGLE_API_KEY")
 	}
 
 	mux := http.NewServeMux()
