@@ -83,14 +83,14 @@ func requireAuth(w http.ResponseWriter, r *http.Request) bool {
 	if r.URL.Path == "/health" {
 		return true
 	}
-	if token := os.Getenv("API_AUTH_TOKEN"); token == "" {
+	token := os.Getenv("API_AUTH_TOKEN")
+	if token == "" {
 		return true
-	} else {
-		auth := r.Header.Get("Authorization")
-		if auth != "Bearer "+token {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return false
-		}
+	}
+	auth := r.Header.Get("Authorization")
+	if auth != "Bearer "+token {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
 	}
 	return true
 }
@@ -140,6 +140,34 @@ func startServer(addr string) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
+	// History endpoints (basic)
+	mux.HandleFunc("/v1/history", func(w http.ResponseWriter, r *http.Request) {
+		if !requireAuth(w, r) {
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			session := r.URL.Query().Get("session")
+			msgs := store.Get(session)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(msgs)
+		case http.MethodPost:
+			var p struct {
+				Session string      `json:"session"`
+				Message ChatMessage `json:"message"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+				http.Error(w, "invalid request body", http.StatusBadRequest)
+				return
+			}
+			_ = store.Append(p.Session, p.Message)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
 	// OpenAI-compatible (basic) completions endpoint
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -147,7 +175,7 @@ func startServer(addr string) {
 			return
 		}
 
-		// global auth (except /health)
+		// auth (except /health)
 		if !requireAuth(w, r) {
 			return
 		}
@@ -158,22 +186,13 @@ func startServer(addr string) {
 			return
 		}
 
-		// default model when not provided
+		// default model
 		if req.Model == "" {
 			req.Model = defaultModel
 		}
 
 		// If stream=true, perform streaming on this endpoint (OpenAI-compatible).
 		if req.Stream {
-			// auth check
-			if token := os.Getenv("API_AUTH_TOKEN"); token != "" {
-				auth := r.Header.Get("Authorization")
-				if auth != fmt.Sprintf("Bearer %s", token) {
-					http.Error(w, "unauthorized", http.StatusUnauthorized)
-					return
-				}
-			}
-
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("Connection", "keep-alive")
@@ -313,6 +332,9 @@ func startServer(addr string) {
 	// SSE streaming endpoint — supports GET (simple) and POST (OpenAI-compatible request body).
 	mux.HandleFunc("/v1/chat/stream", func(w http.ResponseWriter, r *http.Request) {
 		// Allow GET for simple demo; POST to stream with full ChatCompletionRequest in body.
+		if !requireAuth(w, r) {
+			return
+		}
 		var reqBody ChatCompletionRequest
 		var msg string
 		if r.Method == http.MethodGet {
@@ -352,6 +374,9 @@ func startServer(addr string) {
 		// If provider supports streaming, forward a streaming chat completion as SSE.
 		if prov != nil {
 			// build openai request from either GET-derived msg or POST body
+			if reqBody.Model == "" {
+				reqBody.Model = defaultModel
+			}
 			openReq := openai.ChatCompletionRequest{
 				Model:  reqBody.Model,
 				Stream: true,
