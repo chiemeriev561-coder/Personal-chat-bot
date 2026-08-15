@@ -399,6 +399,9 @@ func main() {
 		selectedModel = os.Getenv("CHAT_MODEL")
 	}
 	selectedModel = strings.ToLower(selectedModel)
+	if selectedModel == "" {
+		selectedModel = "gemini"
+	}
 
 	var groqModel string
 	if selectedModel == "groq" || strings.HasPrefix(selectedModel, "llama") || strings.HasPrefix(selectedModel, "mixtral") || strings.HasPrefix(selectedModel, "deepseek") {
