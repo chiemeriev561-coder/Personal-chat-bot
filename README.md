@@ -72,3 +72,31 @@ You can override the configured default model by using the `--model` CLI flag:
 - **Send Message**: Press `Ctrl + S` to send your message to the assistant.
 - **Scroll Viewport**: Use your mouse scroll wheel or click-drag to scroll through the conversation history.
 - **Quit**: Press `Ctrl + C` or type `exit` / `quit` and press `Ctrl + S`.
+
+### HTTP API (new)
+The app exposes an OpenAI-compatible HTTP API when started with --api. Endpoints:
+- POST /v1/chat/completions — OpenAI-compatible completion (JSON request/response).
+- POST or GET /v1/chat/stream — SSE streaming endpoint. POST accepts a ChatCompletion request body (stream=true) to stream model deltas as SSE; GET supports a simple ?message= demo.
+- GET /health — health check (returns {"status":"ok"}).
+
+Provider selection priority: NVIDIA -> Groq -> Gemini. Set environment vars to select a provider:
+- NVIDIA: NVIDIA_API_KEY and NVIDIA_API_BASE (OpenAI-compatible NVIDIA endpoint)
+- Groq: GROQ_API_KEY (optional GROQ_API_BASE)
+- Gemini: GEMINI_API_KEY or GOOGLE_API_KEY (Gemini model)
+
+Example (run API server and call completion):
+
+```bash
+# Start API server (default :8080)
+NVIDIA_API_KEY=... NVIDIA_API_BASE=https://... go run main.go --api
+
+# Request a completion
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"model":"gemini-3.6-flash","messages":[{"role":"user","content":"Hello"}]}' \
+  http://localhost:8080/v1/chat/completions
+
+# Stream via POST (newline-delimited SSE)
+curl -N -X POST -H "Content-Type: application/json" \
+  -d '{"model":"gemini-3.6-flash","messages":[{"role":"user","content":"Tell me a joke"}],"stream":true}' \
+  http://localhost:8080/v1/chat/stream
+```
