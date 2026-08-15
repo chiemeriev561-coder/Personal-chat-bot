@@ -16,9 +16,13 @@ type NvidiaProvider struct {
 
 func NewNvidiaProviderFromEnv() (*NvidiaProvider, error) {
 	apiKey := os.Getenv("NVIDIA_API_KEY")
+	if apiKey == "" {
+		return nil, fmt.Errorf("NVIDIA_API_KEY not set")
+	}
 	base := os.Getenv("NVIDIA_API_BASE")
-	if apiKey == "" || base == "" {
-		return nil, fmt.Errorf("NVIDIA_API_KEY or NVIDIA_API_BASE not set")
+	if base == "" {
+		// sensible default for NVIDIA's OpenAI-compatible endpoint
+		base = "https://integrate.api.nvidia.com/v1"
 	}
 	cfg := openai.DefaultConfig(apiKey)
 	cfg.BaseURL = base

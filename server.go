@@ -72,6 +72,7 @@ func startServer(addr string) {
 
 	mux := http.NewServeMux()
 
+	// Health is intentionally public. API endpoints require API_AUTH_TOKEN if set.
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -91,9 +92,89 @@ func startServer(addr string) {
 			return
 		}
 
-		// If an NVIDIA provider is configured, call it (non-streaming). Otherwise fall back to echo.
+		// If stream=true, perform streaming on this endpoint (OpenAI-compatible).
+		if req.Stream {
+			// auth check
+			if token := os.Getenv("API_AUTH_TOKEN"); token != "" {
+				auth := r.Header.Get("Authorization")
+				if auth != fmt.Sprintf("Bearer %s", token) {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+			}
+
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+				return
+			}
+
+			openReq := openai.ChatCompletionRequest{
+				Model:            req.Model,
+				Temperature:      req.Temperature,
+				TopP:             req.TopP,
+				MaxTokens:        req.MaxTokens,
+				N:                req.N,
+				Stop:             req.Stop,
+				PresencePenalty:  req.PresencePenalty,
+				FrequencyPenalty: req.FrequencyPenalty,
+				Stream:           true,
+			}
+			for _, m := range req.Messages {
+				openReq.Messages = append(openReq.Messages, openai.ChatCompletionMessage{Role: m.Role, Content: m.Content})
+			}
+
+			if prov != nil {
+				stream, err := prov.CreateChatCompletionStream(context.Background(), openReq)
+				if err != nil {
+					if err == provider.ErrNotSupported {
+						http.Error(w, "provider does not support streaming", http.StatusNotImplemented)
+						return
+					}
+					http.Error(w, "provider stream error: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				defer stream.Close()
+
+				for {
+					chunk, err := stream.Recv()
+					if err != nil {
+						if err == io.EOF {
+							break
+						}
+						fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+						flusher.Flush()
+						return
+					}
+					if chunk.Content != "" {
+						fmt.Fprintf(w, "data: %s\n\n", chunk.Content)
+						flusher.Flush()
+					}
+				}
+
+				fmt.Fprintf(w, "data: [DONE]\n\n")
+				flusher.Flush()
+				return
+			}
+
+			// fallback demo stream
+			chunks := []string{"Starting stream...", "(no provider)"}
+			for _, c := range chunks {
+				fmt.Fprintf(w, "data: %s\n\n", c)
+				flusher.Flush()
+				time.Sleep(200 * time.Millisecond)
+			}
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			flusher.Flush()
+			return
+		}
+
+		// Non-streaming path follows: call provider if available, else echo
 		if prov != nil {
-			// translate to go-openai request
 			openReq := openai.ChatCompletionRequest{
 				Model:            req.Model,
 				Temperature:      req.Temperature,
@@ -140,40 +221,19 @@ func startServer(addr string) {
 			return
 		}
 
-		// Simple echo-style reply when no provider is configured.
+		// fallback echo
 		userContent := ""
 		if len(req.Messages) > 0 {
-			// prefer the last user message
-			for i := len(req.Messages) - 1; i >= 0; i-- {
-				if req.Messages[i].Role == "user" || req.Messages[i].Role == "assistant" || req.Messages[i].Role == "system" {
-					userContent = req.Messages[i].Content
-					break
-				}
-			}
-		}
-		if userContent == "" && len(req.Messages) > 0 {
 			userContent = req.Messages[len(req.Messages)-1].Content
 		}
-
 		reply := fmt.Sprintf("Echo: %s", userContent)
-
 		resp := map[string]interface{}{
 			"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
 			"object":  "chat.completion",
 			"created": time.Now().Unix(),
-			"choices": []map[string]interface{}{
-				{
-					"index": 0,
-					"message": map[string]string{
-						"role":    "assistant",
-						"content": reply,
-					},
-					"finish_reason": "stop",
-				},
-			},
-			"usage": map[string]int{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+			"choices": []map[string]interface{}{{"index": 0, "message": map[string]string{"role": "assistant", "content": reply}, "finish_reason": "stop"}},
+			"usage":   map[string]int{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
 		}
-
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(resp)

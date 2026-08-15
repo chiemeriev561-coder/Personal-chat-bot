@@ -20,7 +20,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/joho/godotenv"
 	"github.com/sashabaranov/go-openai"
-	"google.golang.org/genai"
+
+	"personalchatbot/provider"
 )
 
 // Messages for async Bubble Tea updates
