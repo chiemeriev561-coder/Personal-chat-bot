@@ -78,6 +78,29 @@ func (hs *HistoryStore) Append(session string, msg ChatMessage) error {
 
 var store = NewHistoryStore("history.json")
 
+func withCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		// Allow browser clients, including Lovable and local development.
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Add("Vary", "Origin")
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next(w, r)
+	}
+}
+
 func requireAuth(w http.ResponseWriter, r *http.Request) bool {
 	// /health is intentionally public
 	if r.URL.Path == "/health" {
@@ -134,14 +157,14 @@ func startServer(addr string) {
 	mux := http.NewServeMux()
 
 	// Health is intentionally public. API endpoints require API_AUTH_TOKEN if set.
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	})
+	}))
 
 	// History endpoints (basic)
-	mux.HandleFunc("/v1/history", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/history", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		if !requireAuth(w, r) {
 			return
 		}
@@ -166,10 +189,10 @@ func startServer(addr string) {
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
-	})
+	}))
 
 	// OpenAI-compatible (basic) completions endpoint
-	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/chat/completions", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -327,10 +350,10 @@ func startServer(addr string) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(resp)
-	})
+	}))
 
 	// SSE streaming endpoint — supports GET (simple) and POST (OpenAI-compatible request body).
-	mux.HandleFunc("/v1/chat/stream", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/chat/stream", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		// Allow GET for simple demo; POST to stream with full ChatCompletionRequest in body.
 		if !requireAuth(w, r) {
 			return
@@ -435,7 +458,7 @@ func startServer(addr string) {
 			// small delay to simulate streaming
 			time.Sleep(250 * time.Millisecond)
 		}
-	})
+	}))
 
 	addrToUse := addr
 	if env := os.Getenv("API_ADDR"); env != "" {
