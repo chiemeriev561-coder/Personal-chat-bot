@@ -412,7 +412,15 @@ func main() {
 	_ = godotenv.Load()
 
 	modelFlag := flag.String("model", "", "Model to use ('gemini' or specific Groq models like 'llama-3.3-70b-versatile', or 'groq' to use default Groq model)")
+	serverFlag := flag.Bool("api", false, "Start HTTP API server (don't run TUI)")
+	apiAddr := flag.String("api-addr", ":8080", "Address for the HTTP API server (when --api is set)")
 	flag.Parse()
+
+	if *serverFlag {
+		// Start HTTP API server and exit (keeps CLI unchanged)
+		startServer(*apiAddr)
+		return
+	}
 
 	ctx := context.Background()
 
@@ -492,4 +500,3 @@ func main() {
 		log.Fatalf("Error running program: %v", err)
 	}
 }
-
