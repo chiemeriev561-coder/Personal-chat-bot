@@ -42,7 +42,7 @@ func startServer(addr string) {
 
 	// Provider selection priority: NVIDIA -> Groq -> Gemini
 	var prov provider.Provider
-	if os.Getenv("NVIDIA_API_KEY") != "" && os.Getenv("NVIDIA_API_BASE") != "" {
+	if os.Getenv("NVIDIA_API_KEY") != "" {
 		p, err := provider.NewNvidiaProviderFromEnv()
 		if err != nil {
 			log.Printf("failed to init NVIDIA provider: %v", err)
