@@ -28,7 +28,7 @@ Create a `.env` file in the root of the project (one is generated automatically 
 ```env
 GEMINI_API_KEY="your-gemini-api-key-here"
 GROQ_API_KEY="your-groq-api-key-here"
-CHAT_MODEL="gemini" # Default model. Set to "groq" to use Groq by default.
+CHAT_MODEL="gemini" # Set to "groq" or any GroqCloud model ID for the CLI.
 ```
 
 > **Note**: `.env` is already configured in `.gitignore` to prevent you from accidentally committing your API secrets.

@@ -419,15 +419,14 @@ func main() {
 	}
 
 	var groqModel string
-	if selectedModel == "groq" || strings.HasPrefix(selectedModel, "llama") || strings.HasPrefix(selectedModel, "mixtral") || strings.HasPrefix(selectedModel, "deepseek") || strings.HasPrefix(selectedModel, "openai/") || strings.HasPrefix(selectedModel, "qwen/") {
+	// Any explicit model other than the provider aliases is passed through to
+	// Groq, allowing CHAT_MODEL to select any model available in GroqCloud.
+	if selectedModel == "groq" || (selectedModel != "gemini" && selectedModel != "nvidia") {
 		if selectedModel == "groq" {
 			groqModel = defaultGroqModel
 			selectedModel = groqModel
 		} else {
-			groqModel = *modelFlag
-			if groqModel == "" {
-				groqModel = os.Getenv("CHAT_MODEL")
-			}
+			groqModel = selectedModel
 		}
 	}
 
