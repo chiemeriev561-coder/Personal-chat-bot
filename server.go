@@ -161,17 +161,33 @@ func startServer(addr string) {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 
-	// SSE streaming endpoint — uses provider streaming if available, otherwise demo stream.
+	// SSE streaming endpoint — supports GET (simple) and POST (OpenAI-compatible request body).
 	mux.HandleFunc("/v1/chat/stream", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+		// Allow GET for simple demo; POST to stream with full ChatCompletionRequest in body.
+		var reqBody ChatCompletionRequest
+		var msg string
+		if r.Method == http.MethodGet {
+			msg = r.URL.Query().Get("message")
+			if msg == "" {
+				msg = "This is a demo stream from the Personal Chat Bot API."
+			}
+		} else if r.Method == http.MethodPost {
+			if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+				http.Error(w, "invalid request body", http.StatusBadRequest)
+				return
+			}
+			// prefer last user message as default
+			if len(reqBody.Messages) > 0 {
+				for i := len(reqBody.Messages) - 1; i >= 0; i-- {
+					if reqBody.Messages[i].Role == "user" {
+						msg = reqBody.Messages[i].Content
+						break
+					}
+				}
+			}
+		} else {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
-		}
-
-		// Allow a simple ?message= override to echo; otherwise use default text
-		msg := r.URL.Query().Get("message")
-		if msg == "" {
-			msg = "This is a demo stream from the Personal Chat Bot API."
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -186,24 +202,32 @@ func startServer(addr string) {
 
 		// If provider supports streaming, forward a streaming chat completion as SSE.
 		if prov != nil {
-			// For GET-based demo, convert query message into a single user message and call the provider stream.
+			// build openai request from either GET-derived msg or POST body
 			openReq := openai.ChatCompletionRequest{
-				Model: "gpt-4o-mini", // default model name; provider may ignore or require a specific one
-				Messages: []openai.ChatCompletionMessage{
-					{Role: "user", Content: msg},
-				},
+				Model:  reqBody.Model,
 				Stream: true,
+			}
+			if len(reqBody.Messages) > 0 {
+				for _, m := range reqBody.Messages {
+					openReq.Messages = append(openReq.Messages, openai.ChatCompletionMessage{Role: m.Role, Content: m.Content})
+				}
+			} else {
+				openReq.Messages = []openai.ChatCompletionMessage{{Role: "user", Content: msg}}
 			}
 
 			stream, err := prov.CreateChatCompletionStream(context.Background(), openReq)
 			if err != nil {
+				if err == provider.ErrNotSupported {
+					http.Error(w, "provider does not support streaming", http.StatusNotImplemented)
+					return
+				}
 				http.Error(w, "provider stream error: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
 			defer stream.Close()
 
 			for {
-				resp, err := stream.Recv()
+				chunk, err := stream.Recv()
 				if err != nil {
 					if err == io.EOF {
 						break
@@ -212,11 +236,9 @@ func startServer(addr string) {
 					flusher.Flush()
 					return
 				}
-				for _, choice := range resp.Choices {
-					if choice.Delta.Content != "" {
-						fmt.Fprintf(w, "data: %s\n\n", choice.Delta.Content)
-						flusher.Flush()
-					}
+				if chunk.Content != "" {
+					fmt.Fprintf(w, "data: %s\n\n", chunk.Content)
+					flusher.Flush()
 				}
 			}
 
