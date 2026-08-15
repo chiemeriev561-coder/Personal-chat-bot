@@ -27,8 +27,7 @@ Create a `.env` file in the root of the project (one is generated automatically 
 
 ```env
 GEMINI_API_KEY="your-gemini-api-key-here"
-GROQ_API_KEY="your-groq-api-key-here"
-CHAT_MODEL="gemini" # Default model. Set to "groq" to use Groq by default.
+CHAT_MODEL="gemini-3.6-flash"
 ```
 
 > **Note**: `.env` is already configured in `.gitignore` to prevent you from accidentally committing your API secrets.
@@ -57,13 +56,7 @@ You can override the configured default model by using the `--model` CLI flag:
 
 ```bash
 # Run using Gemini
-./personalchatbot --model gemini
-
-# Run using the default Groq model (llama-3.3-70b-versatile)
-./personalchatbot --model groq
-
-# Run using a specific Groq model
-./personalchatbot --model deepseek-r1-distill-llama-70b
+./personalchatbot --model gemini-3.6-flash
 ```
 
 ### Controls in TUI
@@ -79,16 +72,13 @@ The app exposes an OpenAI-compatible HTTP API when started with --api. Endpoints
 - POST or GET /v1/chat/stream — SSE streaming endpoint. POST accepts a ChatCompletion request body (stream=true) to stream model deltas as SSE; GET supports a simple ?message= demo.
 - GET /health — health check (returns {"status":"ok"}).
 
-Provider selection priority: NVIDIA -> Groq -> Gemini. Set environment vars to select a provider:
-- NVIDIA: NVIDIA_API_KEY and NVIDIA_API_BASE (OpenAI-compatible NVIDIA endpoint)
-- Groq: GROQ_API_KEY (optional GROQ_API_BASE)
-- Gemini: GEMINI_API_KEY or GOOGLE_API_KEY (Gemini model)
+The API currently uses Gemini. Set `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) and optionally `GEMINI_MODEL`.
 
 Example (run API server and call completion):
 
 ```bash
 # Start API server (default :8080)
-NVIDIA_API_KEY=... NVIDIA_API_BASE=https://... go run main.go --api
+GEMINI_API_KEY=... go run main.go --api
 
 # Request a completion
 curl -X POST -H "Content-Type: application/json" \

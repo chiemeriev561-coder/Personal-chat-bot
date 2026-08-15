@@ -45,6 +45,21 @@ type model struct {
 	providerName   string
 }
 
+func newRenderer(width int) *glamour.TermRenderer {
+	if width < 1 {
+		width = 1
+	}
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		log.Printf("markdown renderer unavailable: %v", err)
+		return nil
+	}
+	return renderer
+}
+
 func parseLastCodeBlock(markdown string) string {
 	lines := strings.Split(markdown, "\n")
 	var codeBlocks []string
@@ -113,11 +128,6 @@ func initialModel(prov provider.Provider, providerName string, modelName string)
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
-	renderer, _ := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(80),
-	)
-
 	var systemHeader string
 	if providerName != "" {
 		systemHeader = fmt.Sprintf("# Victor AI GO CLI Chatbot [%s]\n*Type your message below. Press Ctrl+C to quit.*\n\n---\n", providerName)
@@ -131,7 +141,7 @@ func initialModel(prov provider.Provider, providerName string, modelName string)
 		textarea:     ta,
 		viewport:     vp,
 		spinner:      s,
-		glamour:      renderer,
+		glamour:      newRenderer(80),
 		history:      systemHeader,
 		providerName: providerName,
 	}
@@ -254,11 +264,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Height = msg.Height - headerHeight - footerHeight
 		m.textarea.SetWidth(msg.Width)
 
-		renderer, _ := glamour.NewTermRenderer(
-			glamour.WithAutoStyle(),
-			glamour.WithWordWrap(msg.Width-4),
-		)
-		m.glamour = renderer
+		m.glamour = newRenderer(msg.Width - 4)
 		m.updateViewport()
 
 	case streamChunkMsg:
@@ -308,6 +314,12 @@ func (m *model) updateViewport() {
 	fullText := m.history
 	if m.currentAi != "" {
 		fullText += fmt.Sprintf("**Assistant:**\n%s", m.currentAi)
+	}
+
+	if m.glamour == nil {
+		m.viewport.SetContent(fullText)
+		m.viewport.GotoBottom()
+		return
 	}
 
 	rendered, err := m.glamour.Render(fullText)
@@ -382,7 +394,7 @@ func main() {
 	// Load environment variables from .env file if it exists
 	_ = godotenv.Load()
 
-	modelFlag := flag.String("model", "", "Model to use ('gemini' or specific Groq models like 'llama-3.3-70b-versatile', or 'groq' to use default Groq model)")
+	modelFlag := flag.String("model", "", "Gemini model to use (for example, gemini-3.6-flash)")
 	serverFlag := flag.Bool("api", false, "Start HTTP API server (don't run TUI)")
 	apiAddr := flag.String("api-addr", ":8080", "Address for the HTTP API server (when --api is set)")
 	flag.Parse()
@@ -393,51 +405,21 @@ func main() {
 		return
 	}
 
-	// Determine selected model and groqModel default if needed.
+	// Determine the Gemini model.
 	selectedModel := *modelFlag
 	if selectedModel == "" {
 		selectedModel = os.Getenv("CHAT_MODEL")
 	}
 	selectedModel = strings.ToLower(selectedModel)
 	if selectedModel == "" {
-		selectedModel = "NVIDIA" // Default to NVIDIA if no model specified
-	
+		selectedModel = "gemini-3.6-flash" // Default to Gemini if no model specified
+
 	}
 
-	var groqModel string
-	if selectedModel == "groq" || strings.HasPrefix(selectedModel, "llama") || strings.HasPrefix(selectedModel, "mixtral") || strings.HasPrefix(selectedModel, "deepseek") {
-		if selectedModel == "groq" {
-			groqModel = "llama-3.3-70b-versatile"
-		} else {
-			groqModel = *modelFlag
-			if groqModel == "" {
-				groqModel = os.Getenv("CHAT_MODEL")
-			}
-		}
-	}
-
-	// Provider selection: NVIDIA -> Groq -> Gemini
+	// Gemini is the active provider for now.
 	var prov provider.Provider
 	var providerName string
-	if os.Getenv("NVIDIA_API_KEY") != "" {
-		p, err := provider.NewNvidiaProviderFromEnv()
-		if err != nil {
-			log.Printf("NVIDIA init failed: %v", err)
-		} else {
-			prov = p
-			providerName = "NVIDIA"
-		}
-	}
-	if prov == nil && os.Getenv("GROQ_API_KEY") != "" {
-		p, err := provider.NewGroqProviderFromEnv()
-		if err != nil {
-			log.Printf("Groq init failed: %v", err)
-		} else {
-			prov = p
-			providerName = fmt.Sprintf("Groq (%s)", groqModel)
-		}
-	}
-	if prov == nil && (os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "") {
+	if os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "" {
 		p, err := provider.NewGeminiProviderFromEnv()
 		if err != nil {
 			log.Printf("Gemini init failed: %v", err)
@@ -448,7 +430,7 @@ func main() {
 	}
 
 	if prov == nil {
-		log.Fatal("no provider available: set NVIDIA_API_KEY, GROQ_API_KEY, or GEMINI_API_KEY/GOOGLE_API_KEY")
+		log.Fatal("Gemini provider unavailable: set GEMINI_API_KEY or GOOGLE_API_KEY")
 	}
 
 	p := tea.NewProgram(
