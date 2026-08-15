@@ -14,6 +14,14 @@ type NvidiaProvider struct {
 	client *openai.Client
 }
 
+func responseContent(message openai.ChatCompletionMessage) string {
+	if message.Content != "" {
+		return message.Content
+	}
+	// Some NVIDIA reasoning models return their only text in this field.
+	return message.ReasoningContent
+}
+
 func NewNvidiaProviderFromEnv() (*NvidiaProvider, error) {
 	apiKey := os.Getenv("NVIDIA_API_KEY")
 	if apiKey == "" {
@@ -42,7 +50,7 @@ func (n *NvidiaProvider) CreateChatCompletion(ctx context.Context, req openai.Ch
 		Usage:   map[string]int{"prompt_tokens": resp.Usage.PromptTokens, "completion_tokens": resp.Usage.CompletionTokens, "total_tokens": resp.Usage.TotalTokens},
 	}
 	for i, ch := range resp.Choices {
-		out.Choices = append(out.Choices, Choice{Index: i, Role: ch.Message.Role, Content: ch.Message.Content, FinishReason: string(ch.FinishReason)})
+		out.Choices = append(out.Choices, Choice{Index: i, Role: ch.Message.Role, Content: responseContent(ch.Message), FinishReason: string(ch.FinishReason)})
 	}
 	return out, nil
 }
@@ -62,6 +70,9 @@ func (w *openAIStreamWrapper) Recv() (StreamChunk, error) {
 	var combined string
 	for _, ch := range resp.Choices {
 		combined += ch.Delta.Content
+		if ch.Delta.Content == "" {
+			combined += ch.Delta.ReasoningContent
+		}
 	}
 	return StreamChunk{Content: combined}, nil
 }
