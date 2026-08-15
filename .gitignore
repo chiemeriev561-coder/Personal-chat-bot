@@ -9,3 +9,6 @@ victor-bot
 *.dll
 *.so
 *.dylib
+
+# Ignore local history file
+texthistory.json
