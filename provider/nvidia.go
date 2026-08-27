@@ -12,7 +12,8 @@ import (
 // NvidiaProvider uses an OpenAI-compatible client configured for an NVIDIA
 // inference endpoint.
 type NvidiaProvider struct {
-	client *openai.Client
+	client  *openai.Client
+	baseURL string
 }
 
 func responseContent(message openai.ChatCompletionMessage) string {
@@ -41,7 +42,7 @@ func NewNvidiaProviderFromEnv() (*NvidiaProvider, error) {
 	cfg := openai.DefaultConfig(apiKey)
 	cfg.BaseURL = base
 	client := openai.NewClientWithConfig(cfg)
-	return &NvidiaProvider{client: client}, nil
+	return &NvidiaProvider{client: client, baseURL: base}, nil
 }
 
 func (n *NvidiaProvider) prepareRequest(req openai.ChatCompletionRequest) openai.ChatCompletionRequest {
@@ -56,7 +57,7 @@ func (n *NvidiaProvider) CreateChatCompletion(ctx context.Context, req openai.Ch
 	req = n.prepareRequest(req)
 	resp, err := n.client.CreateChatCompletion(ctx, req)
 	if err != nil {
-		return CompletionResult{}, err
+		return CompletionResult{}, formatEndpointError(err, n.baseURL, req.Model)
 	}
 	out := CompletionResult{
 		ID:      resp.ID,
@@ -100,7 +101,7 @@ func (n *NvidiaProvider) CreateChatCompletionStream(ctx context.Context, req ope
 	req = n.prepareRequest(req)
 	stream, err := n.client.CreateChatCompletionStream(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, formatEndpointError(err, n.baseURL, req.Model)
 	}
 	return &openAIStreamWrapper{stream: stream}, nil
 }

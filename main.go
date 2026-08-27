@@ -31,6 +31,7 @@ type streamDoneMsg struct{}
 type streamErrMsg struct{ err error }
 
 type model struct {
+	registry       *ProviderRegistry
 	prov           provider.Provider
 	modelName      string
 	viewport       viewport.Model
@@ -116,9 +117,57 @@ func (m model) copyToClipboard(text string, successMsg string) model {
 	return m
 }
 
-func initialModel(prov provider.Provider, providerName string, modelName string) model {
+func (m model) cycleModel() model {
+	if m.registry == nil {
+		return m
+	}
+	modelsList := m.registry.ListModels()
+	if len(modelsList) == 0 {
+		return m
+	}
+
+	currIndex := -1
+	for i, item := range modelsList {
+		if id, ok := item["id"].(string); ok && id == m.modelName {
+			currIndex = i
+			break
+		}
+	}
+
+	nextIndex := (currIndex + 1) % len(modelsList)
+	nextModel, ok := modelsList[nextIndex]["id"].(string)
+	if !ok || nextModel == "" {
+		return m
+	}
+
+	prov, targetModel, err := m.registry.ResolveProvider(nextModel)
+	if err != nil {
+		m.copyStatus = "Failed to switch model: " + err.Error()
+		return m
+	}
+
+	m.prov = prov
+	m.modelName = targetModel
+	m.providerName = "Active"
+	if ownedBy, ok := modelsList[nextIndex]["owned_by"].(string); ok {
+		m.providerName = strings.Title(ownedBy)
+	}
+	m.copyStatus = fmt.Sprintf("Switched active model to: %s (%s)", m.modelName, m.providerName)
+	return m
+}
+
+func initialModel(reg *ProviderRegistry, selectedModel string) model {
+	if selectedModel == "" {
+		selectedModel = getDefaultModel()
+	}
+
+	prov, targetModel, err := reg.ResolveProvider(selectedModel)
+	if err != nil {
+		log.Fatalf("failed to resolve initial model: %v", err)
+	}
+
 	ta := textarea.New()
-	ta.Placeholder = "Type a message... (Ctrl+S: send · Ctrl+Y/K: copy AI/code · Esc: normal mode)"
+	ta.Placeholder = "Type a message... (Ctrl+S: send · Ctrl+M: switch model · /model <name> · Esc: normal mode)"
 	ta.Focus()
 	ta.CharLimit = 1000000
 	ta.SetWidth(80)
@@ -130,22 +179,18 @@ func initialModel(prov provider.Provider, providerName string, modelName string)
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
-	var systemHeader string
-	if providerName != "" {
-		systemHeader = fmt.Sprintf("# Victor AI GO CLI Chatbot [%s]\n*Type your message below. Press Ctrl+C to quit.*\n\n---\n", providerName)
-	} else {
-		systemHeader = "# Victor AI GO CLI Chatbot\n*Type your message below. Press Ctrl+C to quit.*\n\n---\n"
-	}
+	systemHeader := fmt.Sprintf("# Victor AI GO CLI Chatbot [%s]\n*Type your message below. Press Ctrl+M or use /model <name> to switch models. Press Ctrl+C to quit.*\n\n---\n", targetModel)
 
 	m := model{
+		registry:     reg,
 		prov:         prov,
-		modelName:    modelName,
+		modelName:    targetModel,
 		textarea:     ta,
 		viewport:     vp,
 		spinner:      s,
 		glamour:      newRenderer(80),
 		history:      systemHeader,
-		providerName: providerName,
+		providerName: "Active",
 	}
 
 	m.updateViewport()
@@ -219,6 +264,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case tea.KeyCtrlM:
+			m = m.cycleModel()
+			return m, nil
+
 		case tea.KeyCtrlS:
 			// Ctrl+S sends; Enter inserts a newline (handled natively by textarea)
 			if m.isWaiting {
@@ -231,6 +280,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if input == "exit" || input == "quit" {
 				return m, tea.Quit
+			}
+
+			// CLI Commands for model switching and model listing
+			if input == "/models" || input == "/list" {
+				m.textarea.Reset()
+				modelsList := m.registry.ListModels()
+				var sb strings.Builder
+				sb.WriteString("**System:** Available models and active providers:\n")
+				for _, item := range modelsList {
+					id := item["id"].(string)
+					owner := item["owned_by"].(string)
+					sb.WriteString(fmt.Sprintf("- `%s` (%s)\n", id, owner))
+				}
+				sb.WriteString("\n*Type `/model <name>` or press `Ctrl+M` to switch models.*\n\n---\n")
+				m.history += sb.String()
+				m.updateViewport()
+				return m, nil
+			}
+
+			if strings.HasPrefix(input, "/model ") || strings.HasPrefix(input, "/use ") {
+				m.textarea.Reset()
+				target := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(input, "/model "), "/use "))
+				prov, targetModel, err := m.registry.ResolveProvider(target)
+				if err != nil {
+					m.copyStatus = "Failed to switch model: " + err.Error()
+					return m, nil
+				}
+				m.prov = prov
+				m.modelName = targetModel
+				m.copyStatus = fmt.Sprintf("Switched active model to: %s", targetModel)
+				m.history += fmt.Sprintf("*Switched active model to **%s***\n\n---\n", targetModel)
+				m.updateViewport()
+				return m, nil
 			}
 
 			m.textarea.Reset()
@@ -294,7 +376,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	var footerView string
 	if m.isWaiting {
-		footerView = fmt.Sprintf("%s Assistant (%s) is thinking...", m.spinner.View(), m.providerName)
+		footerView = fmt.Sprintf("%s Assistant (%s) is thinking...", m.spinner.View(), m.modelName)
 	} else {
 		footerView = m.textarea.View()
 	}
@@ -333,7 +415,7 @@ func (m *model) updateViewport() {
 	m.viewport.GotoBottom()
 }
 
-// sendStreamCmd collects all stream chunks from the active API (Gemini or Groq)
+// sendStreamCmd collects all stream chunks from the active provider
 // and returns them as a tea.Sequence so Bubble Tea dispatches each streamChunkMsg
 // individually, re-rendering after every chunk for a live typing effect.
 func (m model) sendStreamCmd(input string) tea.Cmd {
@@ -402,92 +484,23 @@ func main() {
 	flag.Parse()
 
 	if *serverFlag {
-		// Start HTTP API server and exit (keeps CLI unchanged)
+		// Start HTTP API server and exit
 		startServer(*apiAddr)
 		return
 	}
 
-	// Determine selected model
+	reg := NewProviderRegistry()
+	if len(reg.providers) == 0 {
+		log.Fatal("no AI providers configured: set DEEPSEEK_API_KEY, GEMINI_API_KEY/GOOGLE_API_KEY, GROQ_API_KEY, or NVIDIA_API_KEY in .env")
+	}
+
 	selectedModel := *modelFlag
 	if selectedModel == "" {
 		selectedModel = os.Getenv("CHAT_MODEL")
 	}
 
-	// Provider selection
-	var prov provider.Provider
-	var providerName string
-
-	// 1. DeepSeek provider
-	if os.Getenv("DEEPSEEK_API_KEY") != "" && (selectedModel == "" || strings.Contains(strings.ToLower(selectedModel), "deepseek")) {
-		p, err := provider.NewDeepSeekProviderFromEnv()
-		if err != nil {
-			log.Printf("DeepSeek init failed: %v", err)
-		} else {
-			prov = p
-			providerName = "DeepSeek"
-		}
-	}
-
-	// 2. Gemini provider
-	if prov == nil && (os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "") && (selectedModel == "" || strings.Contains(strings.ToLower(selectedModel), "gemini")) {
-		p, err := provider.NewGeminiProviderFromEnv()
-		if err != nil {
-			log.Printf("Gemini init failed: %v", err)
-		} else {
-			prov = p
-			providerName = "Gemini"
-		}
-	}
-
-	// 3. Groq provider
-	if prov == nil && os.Getenv("GROQ_API_KEY") != "" {
-		p, err := provider.NewGroqProviderFromEnv()
-		if err != nil {
-			log.Printf("Groq init failed: %v", err)
-		} else {
-			prov = p
-			providerName = "Groq"
-		}
-	}
-
-	// 4. NVIDIA provider
-	if prov == nil && os.Getenv("NVIDIA_API_KEY") != "" {
-		p, err := provider.NewNvidiaProviderFromEnv()
-		if err != nil {
-			log.Printf("NVIDIA init failed: %v", err)
-		} else {
-			prov = p
-			providerName = "NVIDIA"
-		}
-	}
-
-	// Fallback to any configured provider if selectedModel didn't match specific provider logic above
-	if prov == nil {
-		if os.Getenv("DEEPSEEK_API_KEY") != "" {
-			prov, _ = provider.NewDeepSeekProviderFromEnv()
-			providerName = "DeepSeek"
-		} else if os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "" {
-			prov, _ = provider.NewGeminiProviderFromEnv()
-			providerName = "Gemini"
-		} else if os.Getenv("GROQ_API_KEY") != "" {
-			prov, _ = provider.NewGroqProviderFromEnv()
-			providerName = "Groq"
-		} else if os.Getenv("NVIDIA_API_KEY") != "" {
-			prov, _ = provider.NewNvidiaProviderFromEnv()
-			providerName = "NVIDIA"
-		}
-	}
-
-	if prov == nil {
-		log.Fatal("no provider available: set DEEPSEEK_API_KEY, GEMINI_API_KEY/GOOGLE_API_KEY, GROQ_API_KEY, or NVIDIA_API_KEY")
-	}
-
-	if selectedModel == "" {
-		selectedModel = "deepseek-v4-flash"
-	}
-
 	p := tea.NewProgram(
-		initialModel(prov, providerName, selectedModel),
+		initialModel(reg, selectedModel),
 		tea.WithAltScreen(),       // Use full terminal buffer
 		tea.WithMouseCellMotion(), // Allow mouse scroll
 	)

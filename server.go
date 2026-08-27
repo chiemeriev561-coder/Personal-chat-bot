@@ -236,7 +236,7 @@ func (reg *ProviderRegistry) ListModels() []map[string]interface{} {
 	}
 
 	if _, ok := reg.providers["nvidia"]; ok {
-		nvidiaModels := []string{"nvidia/nemotron-3.5-lightning-30b-a3b", "deepseek-ai/deepseek-v4-flash"}
+		nvidiaModels := []string{"deepseek-ai/deepseek-r1", "deepseek-ai/deepseek-v3", "nvidia/nemotron-3.5-lightning-30b-a3b"}
 		for _, m := range nvidiaModels {
 			models = append(models, map[string]interface{}{
 				"id":       m,

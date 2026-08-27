@@ -68,8 +68,12 @@ You can override the configured default model by using the `--model` CLI flag:
 
 ### Controls in TUI
 - **Type messages**: Simply start typing in the lower text area.
-- **New Line**: Press `Enter` to create a new line in the text area.
 - **Send Message**: Press `Ctrl + S` to send your message to the assistant.
+- **Switch Models**:
+  - Press **`Ctrl + M`** to cycle through all available models across active providers in real-time.
+  - Type **`/model <name>`** (e.g. `/model gemini-3.6-flash`, `/model deepseek-v4-flash`, `/model groq`, `/model nvidia`) and press `Ctrl + S` to switch to a specific model.
+  - Type **`/models`** or **`/list`** and press `Ctrl + S` to list all available models and active providers.
+- **Normal Mode**: Press `Esc` to toggle normal mode (`c` to copy last code block, `y` to copy last AI response, `i` to resume typing).
 - **Scroll Viewport**: Use your mouse scroll wheel or click-drag to scroll through the conversation history.
 - **Quit**: Press `Ctrl + C` or type `exit` / `quit` and press `Ctrl + S`.
 

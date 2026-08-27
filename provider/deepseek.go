@@ -58,11 +58,25 @@ func (d *DeepSeekProvider) prepareRequest(req openai.ChatCompletionRequest) open
 	return req
 }
 
+func formatEndpointError(err error, baseURL string, model string) error {
+	if err == nil {
+		return nil
+	}
+	errStr := err.Error()
+	if strings.Contains(errStr, "invalid character") || strings.Contains(errStr, "looking for beginning of value") {
+		if strings.Contains(baseURL, "nvidia.com") {
+			return fmt.Errorf("HTTP 404 from NVIDIA Build (%s) for model '%s'. Available DeepSeek models on NVIDIA Build are 'deepseek-ai/deepseek-r1' and 'deepseek-ai/deepseek-v3'", baseURL, model)
+		}
+		return fmt.Errorf("HTTP 404 / Invalid response from endpoint (%s) for model '%s'. Please check your model name and API key", baseURL, model)
+	}
+	return err
+}
+
 func (d *DeepSeekProvider) CreateChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (CompletionResult, error) {
 	req = d.prepareRequest(req)
 	resp, err := d.client.CreateChatCompletion(ctx, req)
 	if err != nil {
-		return CompletionResult{}, err
+		return CompletionResult{}, formatEndpointError(err, d.baseURL, req.Model)
 	}
 	out := CompletionResult{
 		ID:      resp.ID,
@@ -80,7 +94,7 @@ func (d *DeepSeekProvider) CreateChatCompletionStream(ctx context.Context, req o
 	req = d.prepareRequest(req)
 	stream, err := d.client.CreateChatCompletionStream(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, formatEndpointError(err, d.baseURL, req.Model)
 	}
 	return &openAIStreamWrapper{stream: stream}, nil
 }
