@@ -44,7 +44,16 @@ func NewNvidiaProviderFromEnv() (*NvidiaProvider, error) {
 	return &NvidiaProvider{client: client}, nil
 }
 
+func (n *NvidiaProvider) prepareRequest(req openai.ChatCompletionRequest) openai.ChatCompletionRequest {
+	// NVIDIA Build endpoint requires deepseek-ai/ prefix for DeepSeek models
+	if strings.HasPrefix(req.Model, "deepseek") && !strings.HasPrefix(req.Model, "deepseek-ai/") {
+		req.Model = "deepseek-ai/" + req.Model
+	}
+	return req
+}
+
 func (n *NvidiaProvider) CreateChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (CompletionResult, error) {
+	req = n.prepareRequest(req)
 	resp, err := n.client.CreateChatCompletion(ctx, req)
 	if err != nil {
 		return CompletionResult{}, err
@@ -88,6 +97,7 @@ func (w *openAIStreamWrapper) Close() error {
 }
 
 func (n *NvidiaProvider) CreateChatCompletionStream(ctx context.Context, req openai.ChatCompletionRequest) (Stream, error) {
+	req = n.prepareRequest(req)
 	stream, err := n.client.CreateChatCompletionStream(ctx, req)
 	if err != nil {
 		return nil, err

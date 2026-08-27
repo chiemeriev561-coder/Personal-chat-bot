@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,8 +41,214 @@ func writeSSEData(w http.ResponseWriter, value string) {
 	fmt.Fprintf(w, "data: %s\n\n", encoded)
 }
 
-// default model
-var defaultModel = "nvidia/nemotron-3.5-lightning-30b-a3b"
+// getDefaultModel retrieves default model from environment or defaults to deepseek-v4-flash.
+func getDefaultModel() string {
+	if m := os.Getenv("CHAT_MODEL"); m != "" {
+		return m
+	}
+	if m := os.Getenv("DEFAULT_MODEL"); m != "" {
+		return m
+	}
+	return "deepseek-v4-flash"
+}
+
+// ProviderRegistry manages multiple AI providers and routes model requests dynamically.
+type ProviderRegistry struct {
+	mu        sync.RWMutex
+	providers map[string]provider.Provider
+}
+
+func NewProviderRegistry() *ProviderRegistry {
+	reg := &ProviderRegistry{
+		providers: make(map[string]provider.Provider),
+	}
+
+	// 1. DeepSeek provider
+	if os.Getenv("DEEPSEEK_API_KEY") != "" {
+		p, err := provider.NewDeepSeekProviderFromEnv()
+		if err != nil {
+			log.Printf("failed to init DeepSeek provider: %v", err)
+		} else {
+			reg.providers["deepseek"] = p
+			log.Printf("DeepSeek provider initialized")
+		}
+	}
+
+	// 2. Gemini provider
+	if os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "" {
+		p, err := provider.NewGeminiProviderFromEnv()
+		if err != nil {
+			log.Printf("failed to init Gemini provider: %v", err)
+		} else {
+			reg.providers["gemini"] = p
+			log.Printf("Gemini provider initialized")
+		}
+	}
+
+	// 3. Groq provider
+	if os.Getenv("GROQ_API_KEY") != "" {
+		p, err := provider.NewGroqProviderFromEnv()
+		if err != nil {
+			log.Printf("failed to init Groq provider: %v", err)
+		} else {
+			reg.providers["groq"] = p
+			log.Printf("Groq provider initialized")
+		}
+	}
+
+	// 4. NVIDIA provider
+	if os.Getenv("NVIDIA_API_KEY") != "" {
+		p, err := provider.NewNvidiaProviderFromEnv()
+		if err != nil {
+			log.Printf("failed to init NVIDIA provider: %v", err)
+		} else {
+			reg.providers["nvidia"] = p
+			log.Printf("NVIDIA provider initialized")
+		}
+	}
+
+	return reg
+}
+
+func (reg *ProviderRegistry) ProviderNames() []string {
+	reg.mu.RLock()
+	defer reg.mu.RUnlock()
+	var names []string
+	for k := range reg.providers {
+		names = append(names, k)
+	}
+	return names
+}
+
+func (reg *ProviderRegistry) ResolveProvider(requestedModel string) (provider.Provider, string, error) {
+	reg.mu.RLock()
+	defer reg.mu.RUnlock()
+
+	if len(reg.providers) == 0 {
+		return nil, "", fmt.Errorf("no AI providers configured. Please set DEEPSEEK_API_KEY, GEMINI_API_KEY, GROQ_API_KEY, or NVIDIA_API_KEY")
+	}
+
+	if requestedModel == "" {
+		requestedModel = getDefaultModel()
+	}
+
+	modelLower := strings.ToLower(requestedModel)
+
+	// Check explicit provider prefix: e.g. "deepseek/deepseek-v4-flash", "gemini/gemini-3.6-flash", "groq/...", "nvidia/..."
+	parts := strings.SplitN(requestedModel, "/", 2)
+	if len(parts) == 2 {
+		prefix := strings.ToLower(parts[0])
+		if p, ok := reg.providers[prefix]; ok {
+			return p, parts[1], nil
+		}
+	}
+
+	// Keyword-based routing for switching models
+	if strings.Contains(modelLower, "deepseek") {
+		if p, ok := reg.providers["deepseek"]; ok {
+			return p, requestedModel, nil
+		}
+		if p, ok := reg.providers["groq"]; ok {
+			return p, requestedModel, nil
+		}
+		if p, ok := reg.providers["nvidia"]; ok {
+			return p, requestedModel, nil
+		}
+	}
+
+	if strings.Contains(modelLower, "gemini") || strings.Contains(modelLower, "google") {
+		if p, ok := reg.providers["gemini"]; ok {
+			return p, requestedModel, nil
+		}
+	}
+
+	if strings.Contains(modelLower, "llama") || strings.Contains(modelLower, "mixtral") || strings.Contains(modelLower, "gemma") || strings.Contains(modelLower, "groq") {
+		if p, ok := reg.providers["groq"]; ok {
+			return p, requestedModel, nil
+		}
+		if p, ok := reg.providers["nvidia"]; ok {
+			return p, requestedModel, nil
+		}
+	}
+
+	if strings.Contains(modelLower, "nvidia") || strings.Contains(modelLower, "nemotron") || strings.HasPrefix(modelLower, "nvdev") {
+		if p, ok := reg.providers["nvidia"]; ok {
+			return p, requestedModel, nil
+		}
+	}
+
+	// Preferred fallback order: deepseek -> gemini -> groq -> nvidia
+	for _, key := range []string{"deepseek", "gemini", "groq", "nvidia"} {
+		if p, ok := reg.providers[key]; ok {
+			return p, requestedModel, nil
+		}
+	}
+
+	// Any registered provider
+	for _, p := range reg.providers {
+		return p, requestedModel, nil
+	}
+
+	return nil, "", fmt.Errorf("no provider available for model: %s", requestedModel)
+}
+
+func (reg *ProviderRegistry) ListModels() []map[string]interface{} {
+	reg.mu.RLock()
+	defer reg.mu.RUnlock()
+
+	var models []map[string]interface{}
+	now := time.Now().Unix()
+
+	if _, ok := reg.providers["deepseek"]; ok {
+		deepseekModels := []string{"deepseek-v4-flash", "deepseek-chat", "deepseek-coder", "deepseek-reasoner"}
+		for _, m := range deepseekModels {
+			models = append(models, map[string]interface{}{
+				"id":       m,
+				"object":   "model",
+				"created":  now,
+				"owned_by": "deepseek",
+			})
+		}
+	}
+
+	if _, ok := reg.providers["gemini"]; ok {
+		geminiModels := []string{"gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-pro"}
+		for _, m := range geminiModels {
+			models = append(models, map[string]interface{}{
+				"id":       m,
+				"object":   "model",
+				"created":  now,
+				"owned_by": "google",
+			})
+		}
+	}
+
+	if _, ok := reg.providers["groq"]; ok {
+		groqModels := []string{"llama-3.3-70b-versatile", "deepseek-r1-distill-llama-70b", "mixtral-8x7b-32768"}
+		for _, m := range groqModels {
+			models = append(models, map[string]interface{}{
+				"id":       m,
+				"object":   "model",
+				"created":  now,
+				"owned_by": "groq",
+			})
+		}
+	}
+
+	if _, ok := reg.providers["nvidia"]; ok {
+		nvidiaModels := []string{"nvidia/nemotron-3.5-lightning-30b-a3b", "deepseek-ai/deepseek-v4-flash"}
+		for _, m := range nvidiaModels {
+			models = append(models, map[string]interface{}{
+				"id":       m,
+				"object":   "model",
+				"created":  now,
+				"owned_by": "nvidia",
+			})
+		}
+	}
+
+	return models
+}
 
 // simple in-memory (and on-disk) history store
 type HistoryStore struct {
@@ -129,35 +336,7 @@ func startServer(addr string) {
 		addr = ":8080"
 	}
 
-	// Provider selection priority: NVIDIA -> Groq -> Gemini
-	var prov provider.Provider
-	if os.Getenv("NVIDIA_API_KEY") != "" {
-		p, err := provider.NewNvidiaProviderFromEnv()
-		if err != nil {
-			log.Printf("failed to init NVIDIA provider: %v", err)
-		} else {
-			prov = p
-			log.Printf("NVIDIA provider initialized")
-		}
-	}
-	if prov == nil && os.Getenv("GROQ_API_KEY") != "" {
-		p, err := provider.NewGroqProviderFromEnv()
-		if err != nil {
-			log.Printf("failed to init Groq provider: %v", err)
-		} else {
-			prov = p
-			log.Printf("Groq provider initialized")
-		}
-	}
-	if prov == nil && (os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "") {
-		p, err := provider.NewGeminiProviderFromEnv()
-		if err != nil {
-			log.Printf("failed to init Gemini provider: %v", err)
-		} else {
-			prov = p
-			log.Printf("Gemini provider initialized")
-		}
-	}
+	reg := NewProviderRegistry()
 
 	mux := http.NewServeMux()
 
@@ -165,7 +344,27 @@ func startServer(addr string) {
 	mux.HandleFunc("/health", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":        "ok",
+			"providers":     reg.ProviderNames(),
+			"default_model": getDefaultModel(),
+		})
+	}))
+
+	// Models list endpoint (OpenAI compatible)
+	mux.HandleFunc("/v1/models", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !requireAuth(w, r) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"object": "list",
+			"data":   reg.ListModels(),
+		})
 	}))
 
 	// History endpoints (basic)
@@ -214,9 +413,14 @@ func startServer(addr string) {
 			return
 		}
 
-		// default model
 		if req.Model == "" {
-			req.Model = defaultModel
+			req.Model = getDefaultModel()
+		}
+
+		prov, targetModel, err := reg.ResolveProvider(req.Model)
+		if err != nil {
+			http.Error(w, "model resolution failed: "+err.Error(), http.StatusBadRequest)
+			return
 		}
 
 		// If stream=true, perform streaming on this endpoint (OpenAI-compatible).
@@ -232,7 +436,7 @@ func startServer(addr string) {
 			}
 
 			openReq := openai.ChatCompletionRequest{
-				Model:            req.Model,
+				Model:            targetModel,
 				Temperature:      req.Temperature,
 				TopP:             req.TopP,
 				MaxTokens:        req.MaxTokens,
@@ -294,7 +498,7 @@ func startServer(addr string) {
 		// Non-streaming path follows: call provider if available, else echo
 		if prov != nil {
 			openReq := openai.ChatCompletionRequest{
-				Model:            req.Model,
+				Model:            targetModel,
 				Temperature:      req.Temperature,
 				TopP:             req.TopP,
 				MaxTokens:        req.MaxTokens,
@@ -399,14 +603,20 @@ func startServer(addr string) {
 			return
 		}
 
+		if reqBody.Model == "" {
+			reqBody.Model = getDefaultModel()
+		}
+
+		prov, targetModel, err := reg.ResolveProvider(reqBody.Model)
+		if err != nil {
+			http.Error(w, "model resolution failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
 		// If provider supports streaming, forward a streaming chat completion as SSE.
 		if prov != nil {
-			// build openai request from either GET-derived msg or POST body
-			if reqBody.Model == "" {
-				reqBody.Model = defaultModel
-			}
 			openReq := openai.ChatCompletionRequest{
-				Model:  reqBody.Model,
+				Model:  targetModel,
 				Stream: true,
 			}
 			if len(reqBody.Messages) > 0 {

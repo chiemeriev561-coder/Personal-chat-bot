@@ -73,30 +73,39 @@ You can override the configured default model by using the `--model` CLI flag:
 - **Scroll Viewport**: Use your mouse scroll wheel or click-drag to scroll through the conversation history.
 - **Quit**: Press `Ctrl + C` or type `exit` / `quit` and press `Ctrl + S`.
 
-### HTTP API (new)
-The app exposes an OpenAI-compatible HTTP API when started with --api. Endpoints:
-- POST /v1/chat/completions — OpenAI-compatible completion (JSON request/response).
-- POST or GET /v1/chat/stream — SSE streaming endpoint. POST accepts a ChatCompletion request body (stream=true) to stream model deltas as SSE; GET supports a simple ?message= demo.
-- GET /health — health check (returns {"status":"ok"}).
+### HTTP API
 
-Provider selection priority: NVIDIA -> Groq -> Gemini. Set environment vars to select a provider:
-- NVIDIA: NVIDIA_API_KEY and NVIDIA_API_BASE (OpenAI-compatible NVIDIA endpoint)
-- Groq: GROQ_API_KEY (optional GROQ_API_BASE)
-- Gemini: GEMINI_API_KEY or GOOGLE_API_KEY (Gemini model)
+The app exposes an OpenAI-compatible HTTP API when started with `--api`. Endpoints:
+- **POST `/v1/chat/completions`** — OpenAI-compatible completion (JSON request/response). Supports dynamic model switching per request (`"model": "deepseek-v4-flash"`, `"model": "gemini-3.6-flash"`, `"model": "llama-3.3-70b-versatile"`, etc. or prefixed like `"model": "deepseek/..."`).
+- **POST or GET `/v1/chat/stream`** — SSE streaming endpoint. POST accepts a ChatCompletion request body (`stream=true`) to stream model deltas as SSE; GET supports a simple `?message=` demo.
+- **GET `/v1/models`** — OpenAI-compatible endpoint listing available models for active providers.
+- **GET `/health`** — Health check (returns `{"status":"ok", "providers":[...], "default_model":"..."}`).
 
-Example (run API server and call completion):
+#### Model & Provider Switching
+The API dynamically routes requests to the correct provider based on the `"model"` field in the JSON request body. Supported environment variables:
+- **DeepSeek**: `DEEPSEEK_API_KEY` (models like `deepseek-v4-flash`, `deepseek-chat`, `deepseek-coder`, `deepseek-reasoner`)
+- **Google Gemini**: `GEMINI_API_KEY` or `GOOGLE_API_KEY` (models like `gemini-3.6-flash`, `gemini-2.5-flash`)
+- **Groq**: `GROQ_API_KEY` (models like `llama-3.3-70b-versatile`, `mixtral-8x7b-32768`)
+- **NVIDIA**: `NVIDIA_API_KEY` (models like `nvidia/nemotron-3.5-lightning-30b-a3b`)
+
+NVIDIA is not used as a hardcoded default. You can set `CHAT_MODEL` in your `.env` to specify your preferred default model.
+
+Example:
 
 ```bash
 # Start API server (default :8080)
-NVIDIA_API_KEY=... NVIDIA_API_BASE=https://... go run main.go --api
+DEEPSEEK_API_KEY=... GEMINI_API_KEY=... go run main.go --api
 
-# Request a completion
+# List available models
+curl http://localhost:8080/v1/models
+
+# Request completion with DeepSeek V4 Flash
 curl -X POST -H "Content-Type: application/json" \
-  -d '{"model":"gemini-3.6-flash","messages":[{"role":"user","content":"Hello"}]}' \
+  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Hello"}]}' \
   http://localhost:8080/v1/chat/completions
 
-# Stream via POST (newline-delimited SSE)
-curl -N -X POST -H "Content-Type: application/json" \
-  -d '{"model":"gemini-3.6-flash","messages":[{"role":"user","content":"Tell me a joke"}],"stream":true}' \
-  http://localhost:8080/v1/chat/stream
+# Switch models dynamically for a different task (e.g. Gemini)
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"model":"gemini-3.6-flash","messages":[{"role":"user","content":"Compare Go and Rust"}]}' \
+  http://localhost:8080/v1/chat/completions
 ```

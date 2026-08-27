@@ -396,7 +396,7 @@ func main() {
 	// Load environment variables from .env file if it exists
 	_ = godotenv.Load()
 
-	modelFlag := flag.String("model", "", "Model to use ('gemini' or a specific Groq model like 'openai/gpt-oss-20b', or 'groq' to use the default Groq model)")
+	modelFlag := flag.String("model", "", "Model to use ('deepseek-v4-flash', 'gemini', 'groq', 'nvidia', or specific model name)")
 	serverFlag := flag.Bool("api", false, "Start HTTP API server (don't run TUI)")
 	apiAddr := flag.String("api-addr", ":8080", "Address for the HTTP API server (when --api is set)")
 	flag.Parse()
@@ -407,51 +407,29 @@ func main() {
 		return
 	}
 
-	// Determine selected model and groqModel default if needed.
+	// Determine selected model
 	selectedModel := *modelFlag
 	if selectedModel == "" {
 		selectedModel = os.Getenv("CHAT_MODEL")
 	}
-	selectedModel = strings.ToLower(selectedModel)
-	if selectedModel == "" {
-		selectedModel = "NVIDIA" // Default to NVIDIA if no model specified
 
-	}
-
-	var groqModel string
-	// Any explicit model other than the provider aliases is passed through to
-	// Groq, allowing CHAT_MODEL to select any model available in GroqCloud.
-	if selectedModel == "groq" || (selectedModel != "gemini" && selectedModel != "nvidia") {
-		if selectedModel == "groq" {
-			groqModel = defaultGroqModel
-			selectedModel = groqModel
-		} else {
-			groqModel = selectedModel
-		}
-	}
-
-	// Provider selection priority: NVIDIA -> Groq -> Gemini
+	// Provider selection
 	var prov provider.Provider
 	var providerName string
-	if os.Getenv("NVIDIA_API_KEY") != "" {
-		p, err := provider.NewNvidiaProviderFromEnv()
+
+	// 1. DeepSeek provider
+	if os.Getenv("DEEPSEEK_API_KEY") != "" && (selectedModel == "" || strings.Contains(strings.ToLower(selectedModel), "deepseek")) {
+		p, err := provider.NewDeepSeekProviderFromEnv()
 		if err != nil {
-			log.Printf("NVIDIA init failed: %v", err)
+			log.Printf("DeepSeek init failed: %v", err)
 		} else {
 			prov = p
-			providerName = "NVIDIA"
+			providerName = "DeepSeek"
 		}
 	}
-	if prov == nil && os.Getenv("GROQ_API_KEY") != "" {
-		p, err := provider.NewGroqProviderFromEnv()
-		if err != nil {
-			log.Printf("Groq init failed: %v", err)
-		} else {
-			prov = p
-			providerName = fmt.Sprintf("Groq (%s)", groqModel)
-		}
-	}
-	if prov == nil && (os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "") {
+
+	// 2. Gemini provider
+	if prov == nil && (os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "") && (selectedModel == "" || strings.Contains(strings.ToLower(selectedModel), "gemini")) {
 		p, err := provider.NewGeminiProviderFromEnv()
 		if err != nil {
 			log.Printf("Gemini init failed: %v", err)
@@ -461,8 +439,51 @@ func main() {
 		}
 	}
 
+	// 3. Groq provider
+	if prov == nil && os.Getenv("GROQ_API_KEY") != "" {
+		p, err := provider.NewGroqProviderFromEnv()
+		if err != nil {
+			log.Printf("Groq init failed: %v", err)
+		} else {
+			prov = p
+			providerName = "Groq"
+		}
+	}
+
+	// 4. NVIDIA provider
+	if prov == nil && os.Getenv("NVIDIA_API_KEY") != "" {
+		p, err := provider.NewNvidiaProviderFromEnv()
+		if err != nil {
+			log.Printf("NVIDIA init failed: %v", err)
+		} else {
+			prov = p
+			providerName = "NVIDIA"
+		}
+	}
+
+	// Fallback to any configured provider if selectedModel didn't match specific provider logic above
 	if prov == nil {
-		log.Fatal("no provider available: set NVIDIA_API_KEY, GROQ_API_KEY, or GEMINI_API_KEY/GOOGLE_API_KEY")
+		if os.Getenv("DEEPSEEK_API_KEY") != "" {
+			prov, _ = provider.NewDeepSeekProviderFromEnv()
+			providerName = "DeepSeek"
+		} else if os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "" {
+			prov, _ = provider.NewGeminiProviderFromEnv()
+			providerName = "Gemini"
+		} else if os.Getenv("GROQ_API_KEY") != "" {
+			prov, _ = provider.NewGroqProviderFromEnv()
+			providerName = "Groq"
+		} else if os.Getenv("NVIDIA_API_KEY") != "" {
+			prov, _ = provider.NewNvidiaProviderFromEnv()
+			providerName = "NVIDIA"
+		}
+	}
+
+	if prov == nil {
+		log.Fatal("no provider available: set DEEPSEEK_API_KEY, GEMINI_API_KEY/GOOGLE_API_KEY, GROQ_API_KEY, or NVIDIA_API_KEY")
+	}
+
+	if selectedModel == "" {
+		selectedModel = "deepseek-v4-flash"
 	}
 
 	p := tea.NewProgram(
