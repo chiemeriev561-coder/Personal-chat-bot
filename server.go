@@ -41,6 +41,19 @@ func writeSSEData(w http.ResponseWriter, value string) {
 	fmt.Fprintf(w, "data: %s\n\n", encoded)
 }
 
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	log.Printf("API error status=%d msg=%s", status, msg)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": map[string]interface{}{
+			"message": msg,
+			"type":    "api_error",
+			"code":    status,
+		},
+	})
+}
+
 // getDefaultModel retrieves default model from environment or defaults to deepseek-v4-flash.
 func getDefaultModel() string {
 	if m := os.Getenv("CHAT_MODEL"); m != "" {
@@ -49,7 +62,6 @@ func getDefaultModel() string {
 	if m := os.Getenv("DEFAULT_MODEL"); m != "" {
 		return m
 	}
-	// Prefer the canonical NVIDIA ID when NVIDIA key is present.
 	if os.Getenv("NVIDIA_API_KEY") != "" {
 		return "deepseek-ai/deepseek-v4-flash"
 	}
@@ -67,7 +79,6 @@ func NewProviderRegistry() *ProviderRegistry {
 		providers: make(map[string]provider.Provider),
 	}
 
-	// 1. NVIDIA first when key is present (user is on NVIDIA cloud for DeepSeek v4 Flash)
 	if os.Getenv("NVIDIA_API_KEY") != "" {
 		p, err := provider.NewNvidiaProviderFromEnv()
 		if err != nil {
@@ -78,8 +89,8 @@ func NewProviderRegistry() *ProviderRegistry {
 		}
 	}
 
-	// 2. DeepSeek provider (native DeepSeek API, or falls back to NVIDIA key)
-	if os.Getenv("DEEPSEEK_API_KEY") != "" || (os.Getenv("NVIDIA_API_KEY") != "" && reg.providers["nvidia"] == nil) {
+	// Only register native DeepSeek when DEEPSEEK_API_KEY is set (not just NVIDIA fallback).
+	if os.Getenv("DEEPSEEK_API_KEY") != "" {
 		p, err := provider.NewDeepSeekProviderFromEnv()
 		if err != nil {
 			log.Printf("failed to init DeepSeek provider: %v", err)
@@ -89,7 +100,6 @@ func NewProviderRegistry() *ProviderRegistry {
 		}
 	}
 
-	// 3. Gemini provider
 	if os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "" {
 		p, err := provider.NewGeminiProviderFromEnv()
 		if err != nil {
@@ -100,7 +110,6 @@ func NewProviderRegistry() *ProviderRegistry {
 		}
 	}
 
-	// 4. Groq provider
 	if os.Getenv("GROQ_API_KEY") != "" {
 		p, err := provider.NewGroqProviderFromEnv()
 		if err != nil {
@@ -138,20 +147,24 @@ func (reg *ProviderRegistry) ResolveProvider(requestedModel string) (provider.Pr
 
 	modelLower := strings.ToLower(requestedModel)
 
-	// Explicit provider prefix: e.g. "nvidia/deepseek-ai/deepseek-v4-flash", "deepseek/...", "gemini/..."
+	// Explicit provider prefix only for known registry keys (nvidia/deepseek/gemini/groq).
+	// Do NOT treat "deepseek-ai/..." as a provider prefix.
 	parts := strings.SplitN(requestedModel, "/", 2)
 	if len(parts) == 2 {
 		prefix := strings.ToLower(parts[0])
-		if p, ok := reg.providers[prefix]; ok {
-			target := parts[1]
-			if prefix == "nvidia" {
-				target = provider.NormalizeDeepSeekModelForNVIDIA(target)
+		switch prefix {
+		case "nvidia", "deepseek", "gemini", "groq":
+			if p, ok := reg.providers[prefix]; ok {
+				target := parts[1]
+				if prefix == "nvidia" {
+					target = provider.NormalizeDeepSeekModelForNVIDIA(target)
+				}
+				return p, target, nil
 			}
-			return p, target, nil
 		}
 	}
 
-	// DeepSeek family → prefer NVIDIA when available (user is on NVIDIA cloud)
+	// DeepSeek family → prefer NVIDIA when available
 	if strings.Contains(modelLower, "deepseek") || strings.Contains(modelLower, "v4-flash") {
 		if p, ok := reg.providers["nvidia"]; ok {
 			return p, provider.NormalizeDeepSeekModelForNVIDIA(requestedModel), nil
@@ -185,7 +198,6 @@ func (reg *ProviderRegistry) ResolveProvider(requestedModel string) (provider.Pr
 		}
 	}
 
-	// Preferred fallback order: nvidia -> deepseek -> gemini -> groq
 	for _, key := range []string{"nvidia", "deepseek", "gemini", "groq"} {
 		if p, ok := reg.providers[key]; ok {
 			target := requestedModel
@@ -210,7 +222,6 @@ func (reg *ProviderRegistry) ListModels() []map[string]interface{} {
 	var models []map[string]interface{}
 	now := time.Now().Unix()
 
-	// NVIDIA / DeepSeek-via-NVIDIA: only advertise IDs that work on integrate.api.nvidia.com
 	if _, ok := reg.providers["nvidia"]; ok {
 		nvidiaModels := []string{
 			"deepseek-ai/deepseek-v4-flash",
@@ -228,7 +239,6 @@ func (reg *ProviderRegistry) ListModels() []map[string]interface{} {
 		}
 	}
 
-	// Native DeepSeek API (not NVIDIA)
 	if _, ok := reg.providers["deepseek"]; ok {
 		if _, hasNvidia := reg.providers["nvidia"]; !hasNvidia {
 			deepseekModels := []string{"deepseek-v4-flash", "deepseek-chat", "deepseek-coder", "deepseek-reasoner"}
@@ -270,7 +280,6 @@ func (reg *ProviderRegistry) ListModels() []map[string]interface{} {
 	return models
 }
 
-// simple in-memory (and on-disk) history store
 type HistoryStore struct {
 	mu   sync.Mutex
 	data map[string][]ChatMessage
@@ -342,30 +351,31 @@ func requireAuth(w http.ResponseWriter, r *http.Request) bool {
 	}
 	auth := r.Header.Get("Authorization")
 	if auth != "Bearer "+token {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 		return false
 	}
 	return true
 }
 
-// writeProviderError maps known provider failures to the right HTTP status.
 func writeProviderError(w http.ResponseWriter, err error) {
 	if err == nil {
 		return
 	}
 	msg := err.Error()
 	lower := strings.ToLower(msg)
+	status := http.StatusInternalServerError
 	if strings.Contains(lower, "model_not_found") ||
 		strings.Contains(lower, "404") ||
 		strings.Contains(lower, "not found") ||
 		strings.Contains(lower, "invalid model") {
-		http.Error(w, msg, http.StatusBadRequest)
-		return
+		status = http.StatusBadRequest
 	}
-	http.Error(w, "provider error: "+msg, http.StatusInternalServerError)
+	if strings.Contains(lower, "401") || strings.Contains(lower, "unauthorized") || strings.Contains(lower, "invalid api key") || strings.Contains(lower, "authentication") {
+		status = http.StatusUnauthorized
+	}
+	writeJSONError(w, status, msg)
 }
 
-// Start a simple HTTP API exposing the requested endpoints.
 func startServer(addr string) {
 	if addr == "" {
 		addr = ":8080"
@@ -387,7 +397,7 @@ func startServer(addr string) {
 
 	mux.HandleFunc("/v1/models", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		if !requireAuth(w, r) {
@@ -416,20 +426,20 @@ func startServer(addr string) {
 				Message ChatMessage `json:"message"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-				http.Error(w, "invalid request body", http.StatusBadRequest)
+				writeJSONError(w, http.StatusBadRequest, "invalid request body")
 				return
 			}
 			_ = store.Append(p.Session, p.Message)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		default:
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
 	}))
 
 	mux.HandleFunc("/v1/chat/completions", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 
@@ -439,7 +449,7 @@ func startServer(addr string) {
 
 		var req ChatCompletionRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 			return
 		}
 
@@ -447,9 +457,21 @@ func startServer(addr string) {
 			req.Model = getDefaultModel()
 		}
 
+		// v4-flash does not support streaming — force non-stream BEFORE any headers
+		if provider.IsDeepSeekV4Flash(req.Model) {
+			req.Stream = false
+		}
+
 		prov, targetModel, err := reg.ResolveProvider(req.Model)
 		if err != nil {
-			http.Error(w, "model resolution failed: "+err.Error(), http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "model resolution failed: "+err.Error())
+			return
+		}
+
+		log.Printf("chat/completions model=%q target=%q stream=%v messages=%d", req.Model, targetModel, req.Stream, len(req.Messages))
+
+		if len(req.Messages) == 0 {
+			writeJSONError(w, http.StatusBadRequest, "messages array is required and must not be empty")
 			return
 		}
 
@@ -460,7 +482,7 @@ func startServer(addr string) {
 
 			flusher, ok := w.(http.Flusher)
 			if !ok {
-				http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+				writeJSONError(w, http.StatusInternalServerError, "streaming unsupported by server")
 				return
 			}
 
@@ -486,7 +508,9 @@ func startServer(addr string) {
 						openReq.Stream = false
 						resp, err2 := prov.CreateChatCompletion(context.Background(), openReq)
 						if err2 != nil {
-							writeProviderError(w, err2)
+							log.Printf("non-stream fallback failed: %v", err2)
+							fmt.Fprintf(w, "event: error\ndata: %s\n\n", err2.Error())
+							flusher.Flush()
 							return
 						}
 						if len(resp.Choices) > 0 {
@@ -497,7 +521,9 @@ func startServer(addr string) {
 						flusher.Flush()
 						return
 					}
-					writeProviderError(w, err)
+					log.Printf("stream error: %v", err)
+					fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+					flusher.Flush()
 					return
 				}
 				defer stream.Close()
@@ -523,17 +549,14 @@ func startServer(addr string) {
 				return
 			}
 
-			chunks := []string{"Starting stream...", "(no provider)"}
-			for _, c := range chunks {
-				writeSSEData(w, c)
-				flusher.Flush()
-				time.Sleep(200 * time.Millisecond)
-			}
+			writeSSEData(w, "(no provider)")
+			flusher.Flush()
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
 			return
 		}
 
+		// Non-streaming path
 		if prov != nil {
 			openReq := openai.ChatCompletionRequest{
 				Model:            targetModel,
@@ -544,6 +567,7 @@ func startServer(addr string) {
 				Stop:             req.Stop,
 				PresencePenalty:  req.PresencePenalty,
 				FrequencyPenalty: req.FrequencyPenalty,
+				Stream:           false,
 			}
 			for _, m := range req.Messages {
 				openReq.Messages = append(openReq.Messages, openai.ChatCompletionMessage{Role: m.Role, Content: m.Content})
@@ -551,6 +575,7 @@ func startServer(addr string) {
 
 			resp, err := prov.CreateChatCompletion(context.Background(), openReq)
 			if err != nil {
+				log.Printf("provider CreateChatCompletion failed model=%q: %v", targetModel, err)
 				writeProviderError(w, err)
 				return
 			}
@@ -559,6 +584,7 @@ func startServer(addr string) {
 				"id":      resp.ID,
 				"object":  resp.Object,
 				"created": resp.Created,
+				"model":   targetModel,
 				"choices": []map[string]interface{}{},
 				"usage":   resp.Usage,
 			}
@@ -610,7 +636,7 @@ func startServer(addr string) {
 			}
 		} else if r.Method == http.MethodPost {
 			if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
-				http.Error(w, "invalid request body", http.StatusBadRequest)
+				writeJSONError(w, http.StatusBadRequest, "invalid request body")
 				return
 			}
 			if len(reqBody.Messages) > 0 {
@@ -622,7 +648,22 @@ func startServer(addr string) {
 				}
 			}
 		} else {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		if reqBody.Model == "" {
+			reqBody.Model = getDefaultModel()
+		}
+
+		// Force non-stream response shape for v4-flash even on the stream endpoint
+		if provider.IsDeepSeekV4Flash(reqBody.Model) {
+			reqBody.Stream = false
+		}
+
+		prov, targetModel, err := reg.ResolveProvider(reqBody.Model)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "model resolution failed: "+err.Error())
 			return
 		}
 
@@ -632,24 +673,14 @@ func startServer(addr string) {
 
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-			return
-		}
-
-		if reqBody.Model == "" {
-			reqBody.Model = getDefaultModel()
-		}
-
-		prov, targetModel, err := reg.ResolveProvider(reqBody.Model)
-		if err != nil {
-			http.Error(w, "model resolution failed: "+err.Error(), http.StatusBadRequest)
+			writeJSONError(w, http.StatusInternalServerError, "streaming unsupported")
 			return
 		}
 
 		if prov != nil {
 			openReq := openai.ChatCompletionRequest{
 				Model:  targetModel,
-				Stream: true,
+				Stream: !provider.IsDeepSeekV4Flash(targetModel),
 			}
 			if len(reqBody.Messages) > 0 {
 				for _, m := range reqBody.Messages {
@@ -659,13 +690,32 @@ func startServer(addr string) {
 				openReq.Messages = []openai.ChatCompletionMessage{{Role: "user", Content: msg}}
 			}
 
+			if provider.IsDeepSeekV4Flash(targetModel) || !openReq.Stream {
+				openReq.Stream = false
+				resp, err2 := prov.CreateChatCompletion(context.Background(), openReq)
+				if err2 != nil {
+					log.Printf("stream-endpoint non-stream failed: %v", err2)
+					fmt.Fprintf(w, "event: error\ndata: %s\n\n", err2.Error())
+					flusher.Flush()
+					return
+				}
+				if len(resp.Choices) > 0 {
+					writeSSEData(w, resp.Choices[0].Content)
+					flusher.Flush()
+				}
+				fmt.Fprintf(w, "data: [DONE]\n\n")
+				flusher.Flush()
+				return
+			}
+
 			stream, err := prov.CreateChatCompletionStream(context.Background(), openReq)
 			if err != nil {
 				if err == provider.ErrNotSupported {
 					openReq.Stream = false
 					resp, err2 := prov.CreateChatCompletion(context.Background(), openReq)
 					if err2 != nil {
-						writeProviderError(w, err2)
+						fmt.Fprintf(w, "event: error\ndata: %s\n\n", err2.Error())
+						flusher.Flush()
 						return
 					}
 					if len(resp.Choices) > 0 {
@@ -676,7 +726,8 @@ func startServer(addr string) {
 					flusher.Flush()
 					return
 				}
-				writeProviderError(w, err)
+				fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+				flusher.Flush()
 				return
 			}
 			defer stream.Close()
@@ -702,17 +753,10 @@ func startServer(addr string) {
 			return
 		}
 
-		chunks := []string{
-			"Starting stream...",
-			msg,
-			"[END]",
-		}
-
-		for _, c := range chunks {
-			writeSSEData(w, c)
-			flusher.Flush()
-			time.Sleep(250 * time.Millisecond)
-		}
+		writeSSEData(w, msg)
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
 	}))
 
 	addrToUse := addr
