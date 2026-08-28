@@ -27,6 +27,11 @@ const defaultGroqModel = "openai/gpt-oss-20b"
 
 // Messages for async Bubble Tea updates
 type streamChunkMsg string
+type streamStartMsg struct{ stream provider.Stream }
+type streamChunkWithStreamMsg struct {
+	content string
+	stream  provider.Stream
+}
 type streamDoneMsg struct{}
 type streamErrMsg struct{ err error }
 
@@ -356,6 +361,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentAi += string(msg)
 		m.updateViewport()
 
+	case streamStartMsg:
+		return m, receiveStreamCmd(msg.stream)
+
+	case streamChunkWithStreamMsg:
+		m.currentAi += msg.content
+		m.updateViewport()
+		return m, receiveStreamCmd(msg.stream)
+
 	case streamDoneMsg:
 		m.isWaiting = false
 		m.history += fmt.Sprintf("**Assistant:**\n%s\n\n---\n", m.currentAi)
@@ -415,9 +428,8 @@ func (m *model) updateViewport() {
 	m.viewport.GotoBottom()
 }
 
-// sendStreamCmd collects all stream chunks from the active provider
-// and returns them as a tea.Sequence so Bubble Tea dispatches each streamChunkMsg
-// individually, re-rendering after every chunk for a live typing effect.
+// sendStreamCmd opens the provider stream. Chunks are received individually so
+// the TUI can render them as they arrive.
 func (m model) sendStreamCmd(input string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
@@ -429,7 +441,9 @@ func (m model) sendStreamCmd(input string) tea.Cmd {
 				{Role: "system", Content: "You are an expert developer assistant. Provide precise, idiomatic code examples and direct technical answers."},
 				{Role: "user", Content: input},
 			},
-			Stream: true,
+			MaxCompletionTokens: 512,
+			ReasoningEffort:     "none",
+			Stream:              true,
 		}
 
 		if m.prov != nil {
@@ -452,24 +466,7 @@ func (m model) sendStreamCmd(input string) tea.Cmd {
 				}
 				return streamErrMsg{err: err}
 			}
-			defer stream.Close()
-
-			var cmds []tea.Cmd
-			for {
-				chunk, err := stream.Recv()
-				if err != nil {
-					if err == io.EOF {
-						break
-					}
-					return streamErrMsg{err: err}
-				}
-				if chunk.Content != "" {
-					text := chunk.Content
-					cmds = append(cmds, func() tea.Msg { return streamChunkMsg(text) })
-				}
-			}
-			cmds = append(cmds, func() tea.Msg { return streamDoneMsg{} })
-			return tea.Sequence(cmds...)()
+			return streamStartMsg{stream: stream}
 		}
 
 		// No provider: simple local echo
@@ -478,6 +475,20 @@ func (m model) sendStreamCmd(input string) tea.Cmd {
 			func() tea.Msg { return streamDoneMsg{} },
 		}
 		return tea.Sequence(cmds...)()
+	}
+}
+
+func receiveStreamCmd(stream provider.Stream) tea.Cmd {
+	return func() tea.Msg {
+		chunk, err := stream.Recv()
+		if err != nil {
+			_ = stream.Close()
+			if err == io.EOF {
+				return streamDoneMsg{}
+			}
+			return streamErrMsg{err: err}
+		}
+		return streamChunkWithStreamMsg{content: chunk.Content, stream: stream}
 	}
 }
 
