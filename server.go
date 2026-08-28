@@ -41,7 +41,8 @@ func writeSSEData(w http.ResponseWriter, value string) {
 	fmt.Fprintf(w, "data: %s\n\n", encoded)
 }
 
-// getDefaultModel retrieves default model from environment or defaults to deepseek-v4-flash.
+// getDefaultModel retrieves default model from environment or defaults to the
+// current NVIDIA Build DeepSeek V4 Flash release.
 func getDefaultModel() string {
 	if m := os.Getenv("CHAT_MODEL"); m != "" {
 		return m
@@ -49,7 +50,7 @@ func getDefaultModel() string {
 	if m := os.Getenv("DEFAULT_MODEL"); m != "" {
 		return m
 	}
-	return "deepseek-v4-flash"
+	return "nvidia/deepseek-v4-flash-0731"
 }
 
 // ProviderRegistry manages multiple AI providers and routes model requests dynamically.
@@ -143,6 +144,14 @@ func (reg *ProviderRegistry) ResolveProvider(requestedModel string) (provider.Pr
 		}
 	}
 
+	// DeepSeek V4 Flash 0731 is hosted by NVIDIA Build. Prefer NVIDIA for
+	// this model even when a separate DeepSeek or Groq provider is configured.
+	if strings.Contains(modelLower, "deepseek-v4-flash-0731") {
+		if p, ok := reg.providers["nvidia"]; ok {
+			return p, requestedModel, nil
+		}
+	}
+
 	// Keyword-based routing for switching models
 	if strings.Contains(modelLower, "deepseek") {
 		if p, ok := reg.providers["deepseek"]; ok {
@@ -224,7 +233,7 @@ func (reg *ProviderRegistry) ListModels() []map[string]interface{} {
 	}
 
 	if _, ok := reg.providers["groq"]; ok {
-		groqModels := []string{"llama-3.3-70b-versatile", "deepseek-r1-distill-llama-70b", "mixtral-8x7b-32768"}
+		groqModels := []string{"mixtral-8x7b-32768"}
 		for _, m := range groqModels {
 			models = append(models, map[string]interface{}{
 				"id":       m,
@@ -236,7 +245,7 @@ func (reg *ProviderRegistry) ListModels() []map[string]interface{} {
 	}
 
 	if _, ok := reg.providers["nvidia"]; ok {
-		nvidiaModels := []string{"deepseek-ai/deepseek-v4-flash", "deepseek-v4-flash", "deepseek-ai/deepseek-r1", "deepseek-ai/deepseek-v3", "nvidia/nemotron-3.5-lightning-30b-a3b"}
+		nvidiaModels := []string{"deepseek-ai/deepseek-v4-flash-0731", "deepseek-v4-flash-0731", "deepseek-ai/deepseek-r1", "deepseek-ai/deepseek-v3"}
 		for _, m := range nvidiaModels {
 			models = append(models, map[string]interface{}{
 				"id":       m,

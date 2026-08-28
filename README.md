@@ -80,16 +80,16 @@ You can override the configured default model by using the `--model` CLI flag:
 ### HTTP API
 
 The app exposes an OpenAI-compatible HTTP API when started with `--api`. Endpoints:
-- **POST `/v1/chat/completions`** — OpenAI-compatible completion (JSON request/response). Supports dynamic model switching per request (`"model": "deepseek-v4-flash"`, `"model": "gemini-3.6-flash"`, `"model": "llama-3.3-70b-versatile"`, etc. or prefixed like `"model": "deepseek/..."`).
+- **POST `/v1/chat/completions`** — OpenAI-compatible completion (JSON request/response). Supports dynamic model switching per request (`"model": "deepseek-v4-flash-0731"`, `"model": "gemini-3.6-flash"`, etc. or prefixed like `"model": "nvidia/..."`).
 - **POST or GET `/v1/chat/stream`** — SSE streaming endpoint. POST accepts a ChatCompletion request body (`stream=true`) to stream model deltas as SSE; GET supports a simple `?message=` demo.
 - **GET `/v1/models`** — OpenAI-compatible endpoint listing available models for active providers.
 - **GET `/health`** — Health check (returns `{"status":"ok", "providers":[...], "default_model":"..."}`).
 
 #### Model & Provider Switching
 The API dynamically routes requests to the correct provider based on the `"model"` field in the JSON request body. Supported environment variables:
-- **DeepSeek**: `DEEPSEEK_API_KEY` (models like `deepseek-v4-flash`, `deepseek-chat`, `deepseek-coder`, `deepseek-reasoner`)
+- **DeepSeek/NVIDIA Build**: `NVIDIA_API_KEY` (model `deepseek-ai/deepseek-v4-flash-0731` or alias `deepseek-v4-flash-0731`)
 - **Google Gemini**: `GEMINI_API_KEY` or `GOOGLE_API_KEY` (models like `gemini-3.6-flash`, `gemini-2.5-flash`)
-- **Groq**: `GROQ_API_KEY` (models like `llama-3.3-70b-versatile`, `mixtral-8x7b-32768`)
+- **Groq**: `GROQ_API_KEY` (model `mixtral-8x7b-32768`)
 - **NVIDIA**: `NVIDIA_API_KEY` (models like `nvidia/nemotron-3.5-lightning-30b-a3b`)
 
 NVIDIA is not used as a hardcoded default. You can set `CHAT_MODEL` in your `.env` to specify your preferred default model.

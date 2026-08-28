@@ -12,6 +12,7 @@ import (
 func TestProviderRegistryModelResolution(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
 	t.Setenv("GROQ_API_KEY", "test-groq-key")
+	t.Setenv("NVIDIA_API_KEY", "test-nvidia-key")
 
 	reg := NewProviderRegistry()
 
@@ -37,6 +38,18 @@ func TestProviderRegistryModelResolution(t *testing.T) {
 	}
 	if targetModel2 != "deepseek-v4-flash" {
 		t.Errorf("expected target model 'deepseek-v4-flash', got '%s'", targetModel2)
+	}
+
+	// The current NVIDIA Build V4 Flash model must not fall through to Groq.
+	prov3, targetModel3, err := reg.ResolveProvider("deepseek-v4-flash-0731")
+	if err != nil {
+		t.Fatalf("expected resolution for deepseek-v4-flash-0731, got err: %v", err)
+	}
+	if _, ok := prov3.(*provider.NvidiaProvider); !ok {
+		t.Fatalf("expected deepseek-v4-flash-0731 to route to NVIDIA")
+	}
+	if targetModel3 != "deepseek-v4-flash-0731" {
+		t.Errorf("expected target model 'deepseek-v4-flash-0731', got '%s'", targetModel3)
 	}
 
 	// Test default model does not require NVIDIA
