@@ -81,11 +81,13 @@ func (d *DeepSeekProvider) CreateChatCompletion(ctx context.Context, req openai.
 
 func (d *DeepSeekProvider) CreateChatCompletionStream(ctx context.Context, req openai.ChatCompletionRequest) (Stream, error) {
 	req = d.prepareRequest(req)
+	// DeepSeek v4 Flash does NOT support streaming (especially on NVIDIA Build).
+	// Return immediately so the server falls back to non-streaming.
+	if IsDeepSeekV4Flash(req.Model) {
+		return nil, ErrNotSupported
+	}
 	stream, err := d.client.CreateChatCompletionStream(ctx, req)
 	if err != nil {
-		if IsDeepSeekV4Flash(req.Model) {
-			return nil, ErrNotSupported
-		}
 		return nil, formatEndpointError(err, d.baseURL, req.Model)
 	}
 	return &openAIStreamWrapper{stream: stream}, nil

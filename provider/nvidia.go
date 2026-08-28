@@ -121,14 +121,13 @@ func (w *openAIStreamWrapper) Close() error {
 
 func (n *NvidiaProvider) CreateChatCompletionStream(ctx context.Context, req openai.ChatCompletionRequest) (Stream, error) {
 	req = n.prepareRequest(req)
-	// Try streaming first. If the endpoint rejects it we fall back in the server.
+	// DeepSeek v4 Flash on NVIDIA Build does NOT support streaming.
+	// Return immediately so the server falls back to non-streaming.
+	if IsDeepSeekV4Flash(req.Model) {
+		return nil, ErrNotSupported
+	}
 	stream, err := n.client.CreateChatCompletionStream(ctx, req)
 	if err != nil {
-		// Some NVIDIA builds of deepseek-v4-flash do not support streaming cleanly.
-		// Signal the server to fall back to non-streaming.
-		if IsDeepSeekV4Flash(req.Model) {
-			return nil, ErrNotSupported
-		}
 		return nil, formatEndpointError(err, n.baseURL, req.Model)
 	}
 	return &openAIStreamWrapper{stream: stream}, nil
