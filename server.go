@@ -90,36 +90,6 @@ func NewProviderRegistry() *ProviderRegistry {
 		}
 	}
 
-	if os.Getenv("DEEPSEEK_API_KEY") != "" {
-		p, err := provider.NewDeepSeekProviderFromEnv()
-		if err != nil {
-			log.Printf("failed to init DeepSeek provider: %v", err)
-		} else {
-			reg.providers["deepseek"] = p
-			log.Printf("DeepSeek provider initialized")
-		}
-	}
-
-	if os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "" {
-		p, err := provider.NewGeminiProviderFromEnv()
-		if err != nil {
-			log.Printf("failed to init Gemini provider: %v", err)
-		} else {
-			reg.providers["gemini"] = p
-			log.Printf("Gemini provider initialized")
-		}
-	}
-
-	if os.Getenv("GROQ_API_KEY") != "" {
-		p, err := provider.NewGroqProviderFromEnv()
-		if err != nil {
-			log.Printf("failed to init Groq provider: %v", err)
-		} else {
-			reg.providers["groq"] = p
-			log.Printf("Groq provider initialized")
-		}
-	}
-
 	return reg
 }
 
@@ -147,69 +117,15 @@ func (reg *ProviderRegistry) ResolveProvider(requestedModel string) (provider.Pr
 
 	modelLower := strings.ToLower(requestedModel)
 
-	parts := strings.SplitN(requestedModel, "/", 2)
-	if len(parts) == 2 {
-		prefix := strings.ToLower(parts[0])
-		switch prefix {
-		case "nvidia", "deepseek", "gemini", "groq":
-			if p, ok := reg.providers[prefix]; ok {
-				target := parts[1]
-				if prefix == "nvidia" {
-					target = provider.NormalizeDeepSeekModelForNVIDIA(target)
-				}
-				return p, target, nil
-			}
+	if p, ok := reg.providers["nvidia"]; ok {
+		if strings.Contains(modelLower, "deepseek") || strings.Contains(modelLower, "v4-flash") {
+			return p, provider.NvidiaDeepSeekV4Flash, nil
+		}
+		if strings.Contains(modelLower, "nemotron") {
+			return p, "nvidia/nemotron-3.5-lightning-30b-a3b", nil
 		}
 	}
-
-	if strings.Contains(modelLower, "deepseek") || strings.Contains(modelLower, "v4-flash") {
-		if p, ok := reg.providers["nvidia"]; ok {
-			return p, provider.NormalizeDeepSeekModelForNVIDIA(requestedModel), nil
-		}
-		if p, ok := reg.providers["deepseek"]; ok {
-			return p, requestedModel, nil
-		}
-		if p, ok := reg.providers["groq"]; ok {
-			return p, requestedModel, nil
-		}
-	}
-
-	if strings.Contains(modelLower, "gemini") || strings.Contains(modelLower, "google") {
-		if p, ok := reg.providers["gemini"]; ok {
-			return p, requestedModel, nil
-		}
-	}
-
-	if strings.Contains(modelLower, "llama") || strings.Contains(modelLower, "mixtral") || strings.Contains(modelLower, "gemma") || strings.Contains(modelLower, "groq") {
-		if p, ok := reg.providers["groq"]; ok {
-			return p, requestedModel, nil
-		}
-		if p, ok := reg.providers["nvidia"]; ok {
-			return p, requestedModel, nil
-		}
-	}
-
-	if strings.Contains(modelLower, "nvidia") || strings.Contains(modelLower, "nemotron") || strings.HasPrefix(modelLower, "nvdev") {
-		if p, ok := reg.providers["nvidia"]; ok {
-			return p, requestedModel, nil
-		}
-	}
-
-	for _, key := range []string{"nvidia", "deepseek", "gemini", "groq"} {
-		if p, ok := reg.providers[key]; ok {
-			target := requestedModel
-			if key == "nvidia" {
-				target = provider.NormalizeDeepSeekModelForNVIDIA(requestedModel)
-			}
-			return p, target, nil
-		}
-	}
-
-	for _, p := range reg.providers {
-		return p, requestedModel, nil
-	}
-
-	return nil, "", fmt.Errorf("no provider available for model: %s", requestedModel)
+	return nil, "", fmt.Errorf("model not available: %s (only DeepSeek V4 Flash and NVIDIA Nemotron are enabled)", requestedModel)
 }
 
 func (reg *ProviderRegistry) ListModels() []map[string]interface{} {
@@ -222,8 +138,6 @@ func (reg *ProviderRegistry) ListModels() []map[string]interface{} {
 	if _, ok := reg.providers["nvidia"]; ok {
 		nvidiaModels := []string{
 			provider.NvidiaDeepSeekV4Flash, // deepseek-ai/deepseek-v4-flash-0731
-			"deepseek-ai/deepseek-r1",
-			"deepseek-ai/deepseek-v3",
 			"nvidia/nemotron-3.5-lightning-30b-a3b",
 		}
 		for _, m := range nvidiaModels {
@@ -232,44 +146,6 @@ func (reg *ProviderRegistry) ListModels() []map[string]interface{} {
 				"object":   "model",
 				"created":  now,
 				"owned_by": "nvidia",
-			})
-		}
-	}
-
-	if _, ok := reg.providers["deepseek"]; ok {
-		if _, hasNvidia := reg.providers["nvidia"]; !hasNvidia {
-			deepseekModels := []string{"deepseek-v4-flash", "deepseek-chat", "deepseek-coder", "deepseek-reasoner"}
-			for _, m := range deepseekModels {
-				models = append(models, map[string]interface{}{
-					"id":       m,
-					"object":   "model",
-					"created":  now,
-					"owned_by": "deepseek",
-				})
-			}
-		}
-	}
-
-	if _, ok := reg.providers["gemini"]; ok {
-		geminiModels := []string{"gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-pro"}
-		for _, m := range geminiModels {
-			models = append(models, map[string]interface{}{
-				"id":       m,
-				"object":   "model",
-				"created":  now,
-				"owned_by": "google",
-			})
-		}
-	}
-
-	if _, ok := reg.providers["groq"]; ok {
-		groqModels := []string{"mixtral-8x7b-32768"}
-		for _, m := range groqModels {
-			models = append(models, map[string]interface{}{
-				"id":       m,
-				"object":   "model",
-				"created":  now,
-				"owned_by": "groq",
 			})
 		}
 	}

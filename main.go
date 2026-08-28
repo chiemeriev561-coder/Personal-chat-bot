@@ -447,6 +447,21 @@ func (m model) sendStreamCmd(input string) tea.Cmd {
 		}
 
 		if m.prov != nil {
+			if provider.IsDeepSeekV4Flash(openReq.Model) {
+				openReq.Stream = false
+				resp, err := m.prov.CreateChatCompletion(ctx, openReq)
+				if err != nil {
+					return streamErrMsg{err: err}
+				}
+				var text string
+				if len(resp.Choices) > 0 {
+					text = resp.Choices[0].Content
+				}
+				return tea.Sequence(
+					func() tea.Msg { return streamChunkMsg(text) },
+					func() tea.Msg { return streamDoneMsg{} },
+				)()
+			}
 			stream, err := m.prov.CreateChatCompletionStream(ctx, openReq)
 			if err != nil {
 				// If provider doesn't support streaming, fall back to non-streaming call and emit full text

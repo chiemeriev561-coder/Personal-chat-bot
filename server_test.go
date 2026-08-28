@@ -28,7 +28,7 @@ func TestProviderRegistryModelResolution(t *testing.T) {
 		t.Errorf("expected target model '%s', got '%s'", provider.NvidiaDeepSeekV4Flash, targetModel)
 	}
 
-	// Test resolving with explicit prefix
+	// DeepSeek aliases are routed to NVIDIA's canonical model.
 	prov2, targetModel2, err := reg.ResolveProvider("deepseek/deepseek-v4-flash")
 	if err != nil {
 		t.Fatalf("expected resolution for deepseek/deepseek-v4-flash, got err: %v", err)
@@ -36,8 +36,8 @@ func TestProviderRegistryModelResolution(t *testing.T) {
 	if prov2 == nil {
 		t.Fatalf("expected non-nil provider")
 	}
-	if targetModel2 != "deepseek-v4-flash" {
-		t.Errorf("expected target model 'deepseek-v4-flash', got '%s'", targetModel2)
+	if targetModel2 != provider.NvidiaDeepSeekV4Flash {
+		t.Errorf("expected target model '%s', got '%s'", provider.NvidiaDeepSeekV4Flash, targetModel2)
 	}
 
 	// The current NVIDIA Build V4 Flash model must not fall through to Groq.
@@ -88,24 +88,26 @@ func TestDeepSeekV4FlashStreamingDisabled(t *testing.T) {
 }
 
 func TestModelsEndpoint(t *testing.T) {
-	t.Setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+	t.Setenv("NVIDIA_API_KEY", "test-nvidia-key")
 
 	reg := NewProviderRegistry()
 	models := reg.ListModels()
 
-	if len(models) == 0 {
-		t.Fatalf("expected models list to be non-empty when DEEPSEEK_API_KEY is set")
+	if len(models) != 2 {
+		t.Fatalf("expected exactly two enabled models, got %d", len(models))
 	}
 
-	foundDeepSeek := false
+	foundDeepSeek, foundNemotron := false, false
 	for _, m := range models {
-		if id, ok := m["id"].(string); ok && id == "deepseek-v4-flash" {
+		if id, ok := m["id"].(string); ok && id == provider.NvidiaDeepSeekV4Flash {
 			foundDeepSeek = true
-			break
+		}
+		if id, ok := m["id"].(string); ok && id == "nvidia/nemotron-3.5-lightning-30b-a3b" {
+			foundNemotron = true
 		}
 	}
 
-	if !foundDeepSeek {
-		t.Errorf("expected to find deepseek-v4-flash in listed models")
+	if !foundDeepSeek || !foundNemotron {
+		t.Errorf("expected DeepSeek V4 Flash and NVIDIA Nemotron in listed models")
 	}
 }
