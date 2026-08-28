@@ -54,7 +54,6 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	})
 }
 
-// getDefaultModel retrieves default model from environment or defaults to deepseek-v4-flash.
 func getDefaultModel() string {
 	if m := os.Getenv("CHAT_MODEL"); m != "" {
 		return m
@@ -63,12 +62,11 @@ func getDefaultModel() string {
 		return m
 	}
 	if os.Getenv("NVIDIA_API_KEY") != "" {
-		return "deepseek-ai/deepseek-v4-flash"
+		return provider.NvidiaDeepSeekV4Flash
 	}
 	return "deepseek-v4-flash"
 }
 
-// ProviderRegistry manages multiple AI providers and routes model requests dynamically.
 type ProviderRegistry struct {
 	mu        sync.RWMutex
 	providers map[string]provider.Provider
@@ -89,7 +87,6 @@ func NewProviderRegistry() *ProviderRegistry {
 		}
 	}
 
-	// Only register native DeepSeek when DEEPSEEK_API_KEY is set (not just NVIDIA fallback).
 	if os.Getenv("DEEPSEEK_API_KEY") != "" {
 		p, err := provider.NewDeepSeekProviderFromEnv()
 		if err != nil {
@@ -147,8 +144,6 @@ func (reg *ProviderRegistry) ResolveProvider(requestedModel string) (provider.Pr
 
 	modelLower := strings.ToLower(requestedModel)
 
-	// Explicit provider prefix only for known registry keys (nvidia/deepseek/gemini/groq).
-	// Do NOT treat "deepseek-ai/..." as a provider prefix.
 	parts := strings.SplitN(requestedModel, "/", 2)
 	if len(parts) == 2 {
 		prefix := strings.ToLower(parts[0])
@@ -164,7 +159,6 @@ func (reg *ProviderRegistry) ResolveProvider(requestedModel string) (provider.Pr
 		}
 	}
 
-	// DeepSeek family → prefer NVIDIA when available
 	if strings.Contains(modelLower, "deepseek") || strings.Contains(modelLower, "v4-flash") {
 		if p, ok := reg.providers["nvidia"]; ok {
 			return p, provider.NormalizeDeepSeekModelForNVIDIA(requestedModel), nil
@@ -224,7 +218,7 @@ func (reg *ProviderRegistry) ListModels() []map[string]interface{} {
 
 	if _, ok := reg.providers["nvidia"]; ok {
 		nvidiaModels := []string{
-			"deepseek-ai/deepseek-v4-flash",
+			provider.NvidiaDeepSeekV4Flash, // deepseek-ai/deepseek-v4-flash-0731
 			"deepseek-ai/deepseek-r1",
 			"deepseek-ai/deepseek-v3",
 			"nvidia/nemotron-3.5-lightning-30b-a3b",
@@ -366,6 +360,9 @@ func writeProviderError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	if strings.Contains(lower, "model_not_found") ||
 		strings.Contains(lower, "404") ||
+		strings.Contains(lower, "410") ||
+		strings.Contains(lower, "gone") ||
+		strings.Contains(lower, "end of life") ||
 		strings.Contains(lower, "not found") ||
 		strings.Contains(lower, "invalid model") {
 		status = http.StatusBadRequest
@@ -457,7 +454,6 @@ func startServer(addr string) {
 			req.Model = getDefaultModel()
 		}
 
-		// v4-flash does not support streaming — force non-stream BEFORE any headers
 		if provider.IsDeepSeekV4Flash(req.Model) {
 			req.Stream = false
 		}
@@ -556,7 +552,6 @@ func startServer(addr string) {
 			return
 		}
 
-		// Non-streaming path
 		if prov != nil {
 			openReq := openai.ChatCompletionRequest{
 				Model:            targetModel,
@@ -656,7 +651,6 @@ func startServer(addr string) {
 			reqBody.Model = getDefaultModel()
 		}
 
-		// Force non-stream response shape for v4-flash even on the stream endpoint
 		if provider.IsDeepSeekV4Flash(reqBody.Model) {
 			reqBody.Stream = false
 		}
@@ -723,7 +717,7 @@ func startServer(addr string) {
 						flusher.Flush()
 					}
 					fmt.Fprintf(w, "data: [DONE]\n\n")
-					flusher.Flush()
+						flusher.Flush()
 					return
 				}
 				fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
