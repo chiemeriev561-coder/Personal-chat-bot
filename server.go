@@ -720,7 +720,7 @@ func startServer(addr string) {
 						flusher.Flush()
 					}
 					fmt.Fprintf(w, "data: [DONE]\n\n")
-						flusher.Flush()
+					flusher.Flush()
 					return
 				}
 				fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
