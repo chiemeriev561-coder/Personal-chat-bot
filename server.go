@@ -49,6 +49,10 @@ func getDefaultModel() string {
 	if m := os.Getenv("DEFAULT_MODEL"); m != "" {
 		return m
 	}
+	// Prefer the canonical NVIDIA ID when NVIDIA key is present.
+	if os.Getenv("NVIDIA_API_KEY") != "" {
+		return "deepseek-ai/deepseek-v4-flash"
+	}
 	return "deepseek-v4-flash"
 }
 
@@ -63,8 +67,19 @@ func NewProviderRegistry() *ProviderRegistry {
 		providers: make(map[string]provider.Provider),
 	}
 
-	// 1. DeepSeek provider
-	if os.Getenv("DEEPSEEK_API_KEY") != "" {
+	// 1. NVIDIA first when key is present (user is on NVIDIA cloud for DeepSeek v4 Flash)
+	if os.Getenv("NVIDIA_API_KEY") != "" {
+		p, err := provider.NewNvidiaProviderFromEnv()
+		if err != nil {
+			log.Printf("failed to init NVIDIA provider: %v", err)
+		} else {
+			reg.providers["nvidia"] = p
+			log.Printf("NVIDIA provider initialized")
+		}
+	}
+
+	// 2. DeepSeek provider (native DeepSeek API, or falls back to NVIDIA key)
+	if os.Getenv("DEEPSEEK_API_KEY") != "" || (os.Getenv("NVIDIA_API_KEY") != "" && reg.providers["nvidia"] == nil) {
 		p, err := provider.NewDeepSeekProviderFromEnv()
 		if err != nil {
 			log.Printf("failed to init DeepSeek provider: %v", err)
@@ -74,7 +89,7 @@ func NewProviderRegistry() *ProviderRegistry {
 		}
 	}
 
-	// 2. Gemini provider
+	// 3. Gemini provider
 	if os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "" {
 		p, err := provider.NewGeminiProviderFromEnv()
 		if err != nil {
@@ -85,7 +100,7 @@ func NewProviderRegistry() *ProviderRegistry {
 		}
 	}
 
-	// 3. Groq provider
+	// 4. Groq provider
 	if os.Getenv("GROQ_API_KEY") != "" {
 		p, err := provider.NewGroqProviderFromEnv()
 		if err != nil {
@@ -93,17 +108,6 @@ func NewProviderRegistry() *ProviderRegistry {
 		} else {
 			reg.providers["groq"] = p
 			log.Printf("Groq provider initialized")
-		}
-	}
-
-	// 4. NVIDIA provider
-	if os.Getenv("NVIDIA_API_KEY") != "" {
-		p, err := provider.NewNvidiaProviderFromEnv()
-		if err != nil {
-			log.Printf("failed to init NVIDIA provider: %v", err)
-		} else {
-			reg.providers["nvidia"] = p
-			log.Printf("NVIDIA provider initialized")
 		}
 	}
 
@@ -134,24 +138,28 @@ func (reg *ProviderRegistry) ResolveProvider(requestedModel string) (provider.Pr
 
 	modelLower := strings.ToLower(requestedModel)
 
-	// Check explicit provider prefix: e.g. "deepseek/deepseek-v4-flash", "gemini/gemini-3.6-flash", "groq/...", "nvidia/..."
+	// Explicit provider prefix: e.g. "nvidia/deepseek-ai/deepseek-v4-flash", "deepseek/...", "gemini/..."
 	parts := strings.SplitN(requestedModel, "/", 2)
 	if len(parts) == 2 {
 		prefix := strings.ToLower(parts[0])
 		if p, ok := reg.providers[prefix]; ok {
-			return p, parts[1], nil
+			target := parts[1]
+			if prefix == "nvidia" {
+				target = provider.NormalizeDeepSeekModelForNVIDIA(target)
+			}
+			return p, target, nil
 		}
 	}
 
-	// Keyword-based routing for switching models
-	if strings.Contains(modelLower, "deepseek") {
+	// DeepSeek family → prefer NVIDIA when available (user is on NVIDIA cloud)
+	if strings.Contains(modelLower, "deepseek") || strings.Contains(modelLower, "v4-flash") {
+		if p, ok := reg.providers["nvidia"]; ok {
+			return p, provider.NormalizeDeepSeekModelForNVIDIA(requestedModel), nil
+		}
 		if p, ok := reg.providers["deepseek"]; ok {
 			return p, requestedModel, nil
 		}
 		if p, ok := reg.providers["groq"]; ok {
-			return p, requestedModel, nil
-		}
-		if p, ok := reg.providers["nvidia"]; ok {
 			return p, requestedModel, nil
 		}
 	}
@@ -177,14 +185,17 @@ func (reg *ProviderRegistry) ResolveProvider(requestedModel string) (provider.Pr
 		}
 	}
 
-	// Preferred fallback order: deepseek -> gemini -> groq -> nvidia
-	for _, key := range []string{"deepseek", "gemini", "groq", "nvidia"} {
+	// Preferred fallback order: nvidia -> deepseek -> gemini -> groq
+	for _, key := range []string{"nvidia", "deepseek", "gemini", "groq"} {
 		if p, ok := reg.providers[key]; ok {
-			return p, requestedModel, nil
+			target := requestedModel
+			if key == "nvidia" {
+				target = provider.NormalizeDeepSeekModelForNVIDIA(requestedModel)
+			}
+			return p, target, nil
 		}
 	}
 
-	// Any registered provider
 	for _, p := range reg.providers {
 		return p, requestedModel, nil
 	}
@@ -199,15 +210,36 @@ func (reg *ProviderRegistry) ListModels() []map[string]interface{} {
 	var models []map[string]interface{}
 	now := time.Now().Unix()
 
-	if _, ok := reg.providers["deepseek"]; ok {
-		deepseekModels := []string{"deepseek-v4-flash", "deepseek-chat", "deepseek-coder", "deepseek-reasoner"}
-		for _, m := range deepseekModels {
+	// NVIDIA / DeepSeek-via-NVIDIA: only advertise IDs that work on integrate.api.nvidia.com
+	if _, ok := reg.providers["nvidia"]; ok {
+		nvidiaModels := []string{
+			"deepseek-ai/deepseek-v4-flash",
+			"deepseek-ai/deepseek-r1",
+			"deepseek-ai/deepseek-v3",
+			"nvidia/nemotron-3.5-lightning-30b-a3b",
+		}
+		for _, m := range nvidiaModels {
 			models = append(models, map[string]interface{}{
 				"id":       m,
 				"object":   "model",
 				"created":  now,
-				"owned_by": "deepseek",
+				"owned_by": "nvidia",
 			})
+		}
+	}
+
+	// Native DeepSeek API (not NVIDIA)
+	if _, ok := reg.providers["deepseek"]; ok {
+		if _, hasNvidia := reg.providers["nvidia"]; !hasNvidia {
+			deepseekModels := []string{"deepseek-v4-flash", "deepseek-chat", "deepseek-coder", "deepseek-reasoner"}
+			for _, m := range deepseekModels {
+				models = append(models, map[string]interface{}{
+					"id":       m,
+					"object":   "model",
+					"created":  now,
+					"owned_by": "deepseek",
+				})
+			}
 		}
 	}
 
@@ -231,18 +263,6 @@ func (reg *ProviderRegistry) ListModels() []map[string]interface{} {
 				"object":   "model",
 				"created":  now,
 				"owned_by": "groq",
-			})
-		}
-	}
-
-	if _, ok := reg.providers["nvidia"]; ok {
-		nvidiaModels := []string{"deepseek-ai/deepseek-v4-flash", "deepseek-v4-flash", "deepseek-ai/deepseek-r1", "deepseek-ai/deepseek-v3", "nvidia/nemotron-3.5-lightning-30b-a3b"}
-		for _, m := range nvidiaModels {
-			models = append(models, map[string]interface{}{
-				"id":       m,
-				"object":   "model",
-				"created":  now,
-				"owned_by": "nvidia",
 			})
 		}
 	}
@@ -293,7 +313,6 @@ var store = NewHistoryStore("history.json")
 func withCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		// Allow browser clients, including Lovable and local development.
 		if origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Add("Vary", "Origin")
@@ -314,7 +333,6 @@ func withCORS(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func requireAuth(w http.ResponseWriter, r *http.Request) bool {
-	// /health is intentionally public
 	if r.URL.Path == "/health" {
 		return true
 	}
@@ -330,6 +348,23 @@ func requireAuth(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+// writeProviderError maps known provider failures to the right HTTP status.
+func writeProviderError(w http.ResponseWriter, err error) {
+	if err == nil {
+		return
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "model_not_found") ||
+		strings.Contains(lower, "404") ||
+		strings.Contains(lower, "not found") ||
+		strings.Contains(lower, "invalid model") {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+	http.Error(w, "provider error: "+msg, http.StatusInternalServerError)
+}
+
 // Start a simple HTTP API exposing the requested endpoints.
 func startServer(addr string) {
 	if addr == "" {
@@ -340,7 +375,6 @@ func startServer(addr string) {
 
 	mux := http.NewServeMux()
 
-	// Health is intentionally public. API endpoints require API_AUTH_TOKEN if set.
 	mux.HandleFunc("/health", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -351,7 +385,6 @@ func startServer(addr string) {
 		})
 	}))
 
-	// Models list endpoint (OpenAI compatible)
 	mux.HandleFunc("/v1/models", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -367,7 +400,6 @@ func startServer(addr string) {
 		})
 	}))
 
-	// History endpoints (basic)
 	mux.HandleFunc("/v1/history", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		if !requireAuth(w, r) {
 			return
@@ -395,14 +427,12 @@ func startServer(addr string) {
 		}
 	}))
 
-	// OpenAI-compatible (basic) completions endpoint
 	mux.HandleFunc("/v1/chat/completions", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		// auth (except /health)
 		if !requireAuth(w, r) {
 			return
 		}
@@ -423,7 +453,6 @@ func startServer(addr string) {
 			return
 		}
 
-		// If stream=true, perform streaming on this endpoint (OpenAI-compatible).
 		if req.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
@@ -457,7 +486,7 @@ func startServer(addr string) {
 						openReq.Stream = false
 						resp, err2 := prov.CreateChatCompletion(context.Background(), openReq)
 						if err2 != nil {
-							http.Error(w, "provider error: "+err2.Error(), http.StatusInternalServerError)
+							writeProviderError(w, err2)
 							return
 						}
 						if len(resp.Choices) > 0 {
@@ -468,7 +497,7 @@ func startServer(addr string) {
 						flusher.Flush()
 						return
 					}
-					http.Error(w, "provider stream error: "+err.Error(), http.StatusInternalServerError)
+					writeProviderError(w, err)
 					return
 				}
 				defer stream.Close()
@@ -494,7 +523,6 @@ func startServer(addr string) {
 				return
 			}
 
-			// fallback demo stream
 			chunks := []string{"Starting stream...", "(no provider)"}
 			for _, c := range chunks {
 				writeSSEData(w, c)
@@ -506,7 +534,6 @@ func startServer(addr string) {
 			return
 		}
 
-		// Non-streaming path follows: call provider if available, else echo
 		if prov != nil {
 			openReq := openai.ChatCompletionRequest{
 				Model:            targetModel,
@@ -524,11 +551,10 @@ func startServer(addr string) {
 
 			resp, err := prov.CreateChatCompletion(context.Background(), openReq)
 			if err != nil {
-				http.Error(w, "provider error: "+err.Error(), http.StatusInternalServerError)
+				writeProviderError(w, err)
 				return
 			}
 
-			// Map provider response to OpenAI-compatible response body
 			out := map[string]interface{}{
 				"id":      resp.ID,
 				"object":  resp.Object,
@@ -554,7 +580,6 @@ func startServer(addr string) {
 			return
 		}
 
-		// fallback echo
 		userContent := ""
 		if len(req.Messages) > 0 {
 			userContent = req.Messages[len(req.Messages)-1].Content
@@ -572,9 +597,7 @@ func startServer(addr string) {
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
 
-	// SSE streaming endpoint — supports GET (simple) and POST (OpenAI-compatible request body).
 	mux.HandleFunc("/v1/chat/stream", withCORS(func(w http.ResponseWriter, r *http.Request) {
-		// Allow GET for simple demo; POST to stream with full ChatCompletionRequest in body.
 		if !requireAuth(w, r) {
 			return
 		}
@@ -590,7 +613,6 @@ func startServer(addr string) {
 				http.Error(w, "invalid request body", http.StatusBadRequest)
 				return
 			}
-			// prefer last user message as default
 			if len(reqBody.Messages) > 0 {
 				for i := len(reqBody.Messages) - 1; i >= 0; i-- {
 					if reqBody.Messages[i].Role == "user" {
@@ -624,7 +646,6 @@ func startServer(addr string) {
 			return
 		}
 
-		// If provider supports streaming, forward a streaming chat completion as SSE.
 		if prov != nil {
 			openReq := openai.ChatCompletionRequest{
 				Model:  targetModel,
@@ -644,7 +665,7 @@ func startServer(addr string) {
 					openReq.Stream = false
 					resp, err2 := prov.CreateChatCompletion(context.Background(), openReq)
 					if err2 != nil {
-						http.Error(w, "provider error: "+err2.Error(), http.StatusInternalServerError)
+						writeProviderError(w, err2)
 						return
 					}
 					if len(resp.Choices) > 0 {
@@ -655,7 +676,7 @@ func startServer(addr string) {
 					flusher.Flush()
 					return
 				}
-				http.Error(w, "provider stream error: "+err.Error(), http.StatusInternalServerError)
+				writeProviderError(w, err)
 				return
 			}
 			defer stream.Close()
@@ -676,13 +697,11 @@ func startServer(addr string) {
 				}
 			}
 
-			// close marker
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
 			return
 		}
 
-		// Fallback demo stream
 		chunks := []string{
 			"Starting stream...",
 			msg,
@@ -692,7 +711,6 @@ func startServer(addr string) {
 		for _, c := range chunks {
 			writeSSEData(w, c)
 			flusher.Flush()
-			// small delay to simulate streaming
 			time.Sleep(250 * time.Millisecond)
 		}
 	}))
