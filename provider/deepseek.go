@@ -9,7 +9,8 @@ import (
 	"github.com/sashabaranov/go-openai"
 )
 
-// DeepSeekProvider uses an OpenAI-compatible client configured for DeepSeek API or NVIDIA Build endpoint.
+// DeepSeekProvider uses an OpenAI-compatible client configured for DeepSeek API
+// or, when only an NVIDIA key is present, the NVIDIA Build endpoint.
 type DeepSeekProvider struct {
 	client  *openai.Client
 	baseURL string
@@ -26,7 +27,7 @@ func NewDeepSeekProviderFromEnv() (*DeepSeekProvider, error) {
 
 	base := os.Getenv("DEEPSEEK_API_BASE")
 	if base == "" {
-		// If using an NVIDIA Build API key (nvapi-...) or NVIDIA key, default base URL to NVIDIA endpoint
+		// Prefer NVIDIA endpoint when the key is an NVIDIA key or NVIDIA_API_KEY is set.
 		if strings.HasPrefix(apiKey, "nvapi-") || os.Getenv("NVIDIA_API_KEY") != "" {
 			base = os.Getenv("NVIDIA_API_BASE")
 			if base == "" {
@@ -49,27 +50,10 @@ func NewDeepSeekProviderFromEnv() (*DeepSeekProvider, error) {
 }
 
 func (d *DeepSeekProvider) prepareRequest(req openai.ChatCompletionRequest) openai.ChatCompletionRequest {
-	// If connecting to NVIDIA Build endpoint, ensure deepseek models carry the "deepseek-ai/" prefix required by NVIDIA
 	if strings.Contains(d.baseURL, "nvidia.com") {
-		if strings.HasPrefix(req.Model, "deepseek") && !strings.HasPrefix(req.Model, "deepseek-ai/") {
-			req.Model = "deepseek-ai/" + req.Model
-		}
+		req.Model = NormalizeDeepSeekModelForNVIDIA(req.Model)
 	}
 	return req
-}
-
-func formatEndpointError(err error, baseURL string, model string) error {
-	if err == nil {
-		return nil
-	}
-	errStr := err.Error()
-	if strings.Contains(errStr, "invalid character") || strings.Contains(errStr, "looking for beginning of value") {
-		if strings.Contains(baseURL, "nvidia.com") {
-			return fmt.Errorf("HTTP 404 from NVIDIA Build (%s) for model '%s'. Available DeepSeek models on NVIDIA Build are 'deepseek-ai/deepseek-r1' and 'deepseek-ai/deepseek-v3'", baseURL, model)
-		}
-		return fmt.Errorf("HTTP 404 / Invalid response from endpoint (%s) for model '%s'. Please check your model name and API key", baseURL, model)
-	}
-	return err
 }
 
 func (d *DeepSeekProvider) CreateChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (CompletionResult, error) {
@@ -85,13 +69,20 @@ func (d *DeepSeekProvider) CreateChatCompletion(ctx context.Context, req openai.
 		Usage:   map[string]int{"prompt_tokens": resp.Usage.PromptTokens, "completion_tokens": resp.Usage.CompletionTokens, "total_tokens": resp.Usage.TotalTokens},
 	}
 	for i, ch := range resp.Choices {
-		out.Choices = append(out.Choices, Choice{Index: i, Role: ch.Message.Role, Content: responseContent(ch.Message), FinishReason: string(ch.FinishReason)})
+		out.Choices = append(out.Choices, Choice{
+			Index:        i,
+			Role:         ch.Message.Role,
+			Content:      responseContent(ch.Message),
+			FinishReason: string(ch.FinishReason),
+		})
 	}
 	return out, nil
 }
 
 func (d *DeepSeekProvider) CreateChatCompletionStream(ctx context.Context, req openai.ChatCompletionRequest) (Stream, error) {
 	req = d.prepareRequest(req)
+	// DeepSeek v4 Flash does NOT support streaming (especially on NVIDIA Build).
+	// Return immediately so the server falls back to non-streaming.
 	if IsDeepSeekV4Flash(req.Model) {
 		return nil, ErrNotSupported
 	}

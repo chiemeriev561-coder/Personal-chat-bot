@@ -24,8 +24,8 @@ func TestProviderRegistryModelResolution(t *testing.T) {
 	if prov == nil {
 		t.Fatalf("expected non-nil provider for deepseek-v4-flash")
 	}
-	if targetModel != "deepseek-v4-flash" {
-		t.Errorf("expected target model 'deepseek-v4-flash', got '%s'", targetModel)
+	if targetModel != provider.NvidiaDeepSeekV4Flash {
+		t.Errorf("expected target model '%s', got '%s'", provider.NvidiaDeepSeekV4Flash, targetModel)
 	}
 
 	// Test resolving with explicit prefix
@@ -48,8 +48,8 @@ func TestProviderRegistryModelResolution(t *testing.T) {
 	if _, ok := prov3.(*provider.NvidiaProvider); !ok {
 		t.Fatalf("expected deepseek-v4-flash-0731 to route to NVIDIA")
 	}
-	if targetModel3 != "deepseek-v4-flash-0731" {
-		t.Errorf("expected target model 'deepseek-v4-flash-0731', got '%s'", targetModel3)
+	if targetModel3 != provider.NvidiaDeepSeekV4Flash {
+		t.Errorf("expected target model '%s', got '%s'", provider.NvidiaDeepSeekV4Flash, targetModel3)
 	}
 
 	// Test default model does not require NVIDIA

@@ -10,7 +10,7 @@ import (
 )
 
 // NvidiaProvider uses an OpenAI-compatible client configured for an NVIDIA
-// inference endpoint.
+// inference endpoint (integrate.api.nvidia.com).
 type NvidiaProvider struct {
 	client  *openai.Client
 	baseURL string
@@ -31,7 +31,6 @@ func NewNvidiaProviderFromEnv() (*NvidiaProvider, error) {
 	}
 	base := os.Getenv("NVIDIA_API_BASE")
 	if base == "" {
-		// sensible default for NVIDIA's OpenAI-compatible endpoint
 		base = "https://integrate.api.nvidia.com/v1"
 	}
 	base = strings.TrimRight(base, "/")
@@ -46,11 +45,30 @@ func NewNvidiaProviderFromEnv() (*NvidiaProvider, error) {
 }
 
 func (n *NvidiaProvider) prepareRequest(req openai.ChatCompletionRequest) openai.ChatCompletionRequest {
-	// NVIDIA Build endpoint requires deepseek-ai/ prefix for DeepSeek models
-	if strings.HasPrefix(req.Model, "deepseek") && !strings.HasPrefix(req.Model, "deepseek-ai/") {
-		req.Model = "deepseek-ai/" + req.Model
-	}
+	// Always normalize DeepSeek model IDs for NVIDIA Build.
+	req.Model = NormalizeDeepSeekModelForNVIDIA(req.Model)
 	return req
+}
+
+func formatEndpointError(err error, baseURL string, model string) error {
+	if err == nil {
+		return nil
+	}
+	errStr := err.Error()
+	lower := strings.ToLower(errStr)
+
+	// Non-JSON / HTML responses almost always mean 404 model-not-found on NVIDIA.
+	if strings.Contains(errStr, "invalid character") ||
+		strings.Contains(errStr, "looking for beginning of value") ||
+		strings.Contains(lower, "404") ||
+		strings.Contains(lower, "not found") ||
+		strings.Contains(lower, "model_not_found") {
+		if strings.Contains(baseURL, "nvidia.com") {
+			return fmt.Errorf("model_not_found: NVIDIA Build rejected model %q (endpoint %s). Use deepseek-ai/deepseek-v4-flash (or deepseek-ai/deepseek-r1 / deepseek-ai/deepseek-v3). Original: %v", model, baseURL, err)
+		}
+		return fmt.Errorf("model_not_found: endpoint %s rejected model %q. Original: %v", baseURL, model, err)
+	}
+	return err
 }
 
 func (n *NvidiaProvider) CreateChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (CompletionResult, error) {
@@ -66,7 +84,12 @@ func (n *NvidiaProvider) CreateChatCompletion(ctx context.Context, req openai.Ch
 		Usage:   map[string]int{"prompt_tokens": resp.Usage.PromptTokens, "completion_tokens": resp.Usage.CompletionTokens, "total_tokens": resp.Usage.TotalTokens},
 	}
 	for i, ch := range resp.Choices {
-		out.Choices = append(out.Choices, Choice{Index: i, Role: ch.Message.Role, Content: responseContent(ch.Message), FinishReason: string(ch.FinishReason)})
+		out.Choices = append(out.Choices, Choice{
+			Index:        i,
+			Role:         ch.Message.Role,
+			Content:      responseContent(ch.Message),
+			FinishReason: string(ch.FinishReason),
+		})
 	}
 	return out, nil
 }
@@ -82,7 +105,6 @@ func (w *openAIStreamWrapper) Recv() (StreamChunk, error) {
 	if err != nil {
 		return StreamChunk{}, err
 	}
-	// aggregate all delta pieces into a single chunk
 	var combined string
 	for _, ch := range resp.Choices {
 		combined += ch.Delta.Content
