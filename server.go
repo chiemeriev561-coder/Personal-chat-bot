@@ -454,7 +454,18 @@ func startServer(addr string) {
 				stream, err := prov.CreateChatCompletionStream(context.Background(), openReq)
 				if err != nil {
 					if err == provider.ErrNotSupported {
-						http.Error(w, "provider does not support streaming", http.StatusNotImplemented)
+						openReq.Stream = false
+						resp, err2 := prov.CreateChatCompletion(context.Background(), openReq)
+						if err2 != nil {
+							http.Error(w, "provider error: "+err2.Error(), http.StatusInternalServerError)
+							return
+						}
+						if len(resp.Choices) > 0 {
+							writeSSEData(w, resp.Choices[0].Content)
+							flusher.Flush()
+						}
+						fmt.Fprintf(w, "data: [DONE]\n\n")
+						flusher.Flush()
 						return
 					}
 					http.Error(w, "provider stream error: "+err.Error(), http.StatusInternalServerError)
@@ -630,7 +641,18 @@ func startServer(addr string) {
 			stream, err := prov.CreateChatCompletionStream(context.Background(), openReq)
 			if err != nil {
 				if err == provider.ErrNotSupported {
-					http.Error(w, "provider does not support streaming", http.StatusNotImplemented)
+					openReq.Stream = false
+					resp, err2 := prov.CreateChatCompletion(context.Background(), openReq)
+					if err2 != nil {
+						http.Error(w, "provider error: "+err2.Error(), http.StatusInternalServerError)
+						return
+					}
+					if len(resp.Choices) > 0 {
+						writeSSEData(w, resp.Choices[0].Content)
+						flusher.Flush()
+					}
+					fmt.Fprintf(w, "data: [DONE]\n\n")
+					flusher.Flush()
 					return
 				}
 				http.Error(w, "provider stream error: "+err.Error(), http.StatusInternalServerError)

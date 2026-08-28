@@ -99,6 +99,9 @@ func (w *openAIStreamWrapper) Close() error {
 
 func (n *NvidiaProvider) CreateChatCompletionStream(ctx context.Context, req openai.ChatCompletionRequest) (Stream, error) {
 	req = n.prepareRequest(req)
+	if IsDeepSeekV4Flash(req.Model) {
+		return nil, ErrNotSupported
+	}
 	stream, err := n.client.CreateChatCompletionStream(ctx, req)
 	if err != nil {
 		return nil, formatEndpointError(err, n.baseURL, req.Model)

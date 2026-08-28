@@ -437,11 +437,18 @@ func (m model) sendStreamCmd(input string) tea.Cmd {
 			if err != nil {
 				// If provider doesn't support streaming, fall back to non-streaming call and emit full text
 				if err == provider.ErrNotSupported {
-					_, err2 := m.prov.CreateChatCompletion(ctx, openReq)
+					resp, err2 := m.prov.CreateChatCompletion(ctx, openReq)
 					if err2 != nil {
 						return streamErrMsg{err: err2}
 					}
-					return streamDoneMsg{}
+					var text string
+					if len(resp.Choices) > 0 {
+						text = resp.Choices[0].Content
+					}
+					return tea.Sequence(
+						func() tea.Msg { return streamChunkMsg(text) },
+						func() tea.Msg { return streamDoneMsg{} },
+					)()
 				}
 				return streamErrMsg{err: err}
 			}

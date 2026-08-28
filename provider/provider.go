@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/sashabaranov/go-openai"
 )
@@ -36,6 +37,12 @@ type Stream interface {
 }
 
 var ErrNotSupported = errors.New("streaming not supported by provider")
+
+// IsDeepSeekV4Flash checks if a requested model name refers to deepseek v4 flash.
+func IsDeepSeekV4Flash(model string) bool {
+	m := strings.ToLower(model)
+	return strings.Contains(m, "deepseek-v4-flash") || strings.Contains(m, "deepseek-v4") || strings.Contains(m, "v4-flash")
+}
 
 // Provider is a minimal interface for chat completions.
 type Provider interface {

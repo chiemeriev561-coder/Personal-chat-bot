@@ -92,6 +92,9 @@ func (d *DeepSeekProvider) CreateChatCompletion(ctx context.Context, req openai.
 
 func (d *DeepSeekProvider) CreateChatCompletionStream(ctx context.Context, req openai.ChatCompletionRequest) (Stream, error) {
 	req = d.prepareRequest(req)
+	if IsDeepSeekV4Flash(req.Model) {
+		return nil, ErrNotSupported
+	}
 	stream, err := d.client.CreateChatCompletionStream(ctx, req)
 	if err != nil {
 		return nil, formatEndpointError(err, d.baseURL, req.Model)

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"testing"
+
+	"github.com/sashabaranov/go-openai"
 
 	"personalchatbot/provider"
 )
@@ -54,6 +57,20 @@ func TestDeepSeekNvidiaBuildKeyAutoDetection(t *testing.T) {
 	}
 	if p == nil {
 		t.Fatalf("expected non-nil DeepSeekProvider for nvapi key")
+	}
+}
+
+func TestDeepSeekV4FlashStreamingDisabled(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "test-key")
+	p, err := provider.NewDeepSeekProviderFromEnv()
+	if err != nil {
+		t.Fatalf("failed to create DeepSeekProvider: %v", err)
+	}
+
+	req := openai.ChatCompletionRequest{Model: "deepseek-v4-flash"}
+	_, streamErr := p.CreateChatCompletionStream(context.Background(), req)
+	if streamErr != provider.ErrNotSupported {
+		t.Errorf("expected ErrNotSupported when streaming deepseek-v4-flash, got: %v", streamErr)
 	}
 }
 
