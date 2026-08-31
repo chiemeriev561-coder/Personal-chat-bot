@@ -64,8 +64,17 @@ func getDefaultModel() string {
 	if m := os.Getenv("DEFAULT_MODEL"); m != "" {
 		return m
 	}
+	if os.Getenv("GROQ_API_KEY") != "" {
+		return "groq"
+	}
+	if os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "" {
+		return "gemini"
+	}
 	if os.Getenv("NVIDIA_API_KEY") != "" {
 		return provider.NvidiaDeepSeekV4Flash
+	}
+	if os.Getenv("DEEPSEEK_API_KEY") != "" {
+		return "deepseek-v4-flash"
 	}
 	return "deepseek-v4-flash"
 }
@@ -78,6 +87,36 @@ type ProviderRegistry struct {
 func NewProviderRegistry() *ProviderRegistry {
 	reg := &ProviderRegistry{
 		providers: make(map[string]provider.Provider),
+	}
+
+	if os.Getenv("GROQ_API_KEY") != "" {
+		p, err := provider.NewGroqProviderFromEnv()
+		if err != nil {
+			log.Printf("failed to init Groq provider: %v", err)
+		} else {
+			reg.providers["groq"] = p
+			log.Printf("Groq provider initialized")
+		}
+	}
+
+	if os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "" {
+		p, err := provider.NewGeminiProviderFromEnv()
+		if err != nil {
+			log.Printf("failed to init Gemini provider: %v", err)
+		} else {
+			reg.providers["gemini"] = p
+			log.Printf("Gemini provider initialized")
+		}
+	}
+
+	if os.Getenv("DEEPSEEK_API_KEY") != "" {
+		p, err := provider.NewDeepSeekProviderFromEnv()
+		if err != nil {
+			log.Printf("failed to init DeepSeek provider: %v", err)
+		} else {
+			reg.providers["deepseek"] = p
+			log.Printf("DeepSeek provider initialized")
+		}
 	}
 
 	if os.Getenv("NVIDIA_API_KEY") != "" {
@@ -115,17 +154,62 @@ func (reg *ProviderRegistry) ResolveProvider(requestedModel string) (provider.Pr
 		requestedModel = getDefaultModel()
 	}
 
-	modelLower := strings.ToLower(requestedModel)
+	modelLower := strings.ToLower(strings.TrimSpace(requestedModel))
+
+	if modelLower == "gemini" || strings.HasPrefix(modelLower, "gemini") {
+		if p, ok := reg.providers["gemini"]; ok {
+			if strings.TrimSpace(requestedModel) == "gemini" || strings.TrimSpace(requestedModel) == "" {
+				return p, "gemini-3.6-flash", nil
+			}
+			return p, requestedModel, nil
+		}
+	}
+
+	if modelLower == "groq" || strings.HasPrefix(modelLower, "groq") || strings.Contains(modelLower, "gpt-oss") {
+		if p, ok := reg.providers["groq"]; ok {
+			if modelLower == "groq" {
+				return p, "openai/gpt-oss-20b", nil
+			}
+			return p, requestedModel, nil
+		}
+	}
 
 	if p, ok := reg.providers["nvidia"]; ok {
-		if strings.Contains(modelLower, "deepseek") || strings.Contains(modelLower, "v4-flash") {
+		if strings.Contains(modelLower, "deepseek") || strings.Contains(modelLower, "v4-flash") || strings.Contains(modelLower, "v4") {
 			return p, provider.NvidiaDeepSeekV4Flash, nil
 		}
-		if strings.Contains(modelLower, "nemotron") {
+		if strings.Contains(modelLower, "nemotron") || strings.Contains(modelLower, "nvidia") {
 			return p, "nvidia/nemotron-3.5-lightning-30b-a3b", nil
 		}
 	}
-	return nil, "", fmt.Errorf("model not available: %s (only DeepSeek V4 Flash and NVIDIA Nemotron are enabled)", requestedModel)
+
+	if p, ok := reg.providers["deepseek"]; ok {
+		if strings.Contains(modelLower, "deepseek") || strings.Contains(modelLower, "v4-flash") {
+			return p, provider.NormalizeDeepSeekModelForNVIDIA(requestedModel), nil
+		}
+	}
+
+	if p, ok := reg.providers["gemini"]; ok {
+		if strings.Contains(modelLower, "gemini") {
+			return p, requestedModel, nil
+		}
+	}
+
+	if p, ok := reg.providers["groq"]; ok {
+		if strings.Contains(modelLower, "groq") || strings.Contains(modelLower, "gpt-oss") {
+			return p, requestedModel, nil
+		}
+	}
+
+	return nil, "", fmt.Errorf("model not available: %s (configured providers: %v)", requestedModel, sortedProviderNames(reg.providers))
+}
+
+func sortedProviderNames(providers map[string]provider.Provider) []string {
+	keys := make([]string, 0, len(providers))
+	for k := range providers {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func (reg *ProviderRegistry) ListModels() []map[string]interface{} {
@@ -135,9 +219,36 @@ func (reg *ProviderRegistry) ListModels() []map[string]interface{} {
 	var models []map[string]interface{}
 	now := time.Now().Unix()
 
+	if _, ok := reg.providers["gemini"]; ok {
+		models = append(models, map[string]interface{}{
+			"id":       "gemini-3.6-flash",
+			"object":   "model",
+			"created":  now,
+			"owned_by": "google",
+		})
+	}
+
+	if _, ok := reg.providers["groq"]; ok {
+		models = append(models, map[string]interface{}{
+			"id":       "openai/gpt-oss-20b",
+			"object":   "model",
+			"created":  now,
+			"owned_by": "groq",
+		})
+	}
+
+	if _, ok := reg.providers["deepseek"]; ok {
+		models = append(models, map[string]interface{}{
+			"id":       "deepseek-v4-flash",
+			"object":   "model",
+			"created":  now,
+			"owned_by": "deepseek",
+		})
+	}
+
 	if _, ok := reg.providers["nvidia"]; ok {
 		nvidiaModels := []string{
-			provider.NvidiaDeepSeekV4Flash, // deepseek-ai/deepseek-v4-flash-0731
+			provider.NvidiaDeepSeekV4Flash,
 			"nvidia/nemotron-3.5-lightning-30b-a3b",
 		}
 		for _, m := range nvidiaModels {

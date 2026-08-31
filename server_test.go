@@ -10,6 +10,8 @@ import (
 )
 
 func TestProviderRegistryModelResolution(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("GOOGLE_API_KEY", "")
 	t.Setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
 	t.Setenv("GROQ_API_KEY", "test-groq-key")
 	t.Setenv("NVIDIA_API_KEY", "test-nvidia-key")
@@ -88,6 +90,10 @@ func TestDeepSeekV4FlashStreamingDisabled(t *testing.T) {
 }
 
 func TestModelsEndpoint(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("GOOGLE_API_KEY", "")
+	t.Setenv("GROQ_API_KEY", "")
+	t.Setenv("DEEPSEEK_API_KEY", "")
 	t.Setenv("NVIDIA_API_KEY", "test-nvidia-key")
 
 	reg := NewProviderRegistry()
@@ -109,5 +115,34 @@ func TestModelsEndpoint(t *testing.T) {
 
 	if !foundDeepSeek || !foundNemotron {
 		t.Errorf("expected DeepSeek V4 Flash and NVIDIA Nemotron in listed models")
+	}
+}
+
+func TestRegistryResolvesGroqAndGeminiAliases(t *testing.T) {
+	reg := &ProviderRegistry{providers: map[string]provider.Provider{
+		"groq":   &provider.GroqProvider{},
+		"gemini": &provider.GeminiProvider{},
+	}}
+
+	prov, target, err := reg.ResolveProvider("groq")
+	if err != nil {
+		t.Fatalf("expected groq alias to resolve: %v", err)
+	}
+	if _, ok := prov.(*provider.GroqProvider); !ok {
+		t.Fatalf("expected Groq provider for groq alias")
+	}
+	if target != "openai/gpt-oss-20b" {
+		t.Fatalf("expected default groq target, got %q", target)
+	}
+
+	prov, target, err = reg.ResolveProvider("gemini-3.6-flash")
+	if err != nil {
+		t.Fatalf("expected gemini alias to resolve: %v", err)
+	}
+	if _, ok := prov.(*provider.GeminiProvider); !ok {
+		t.Fatalf("expected Gemini provider for gemini alias")
+	}
+	if target != "gemini-3.6-flash" {
+		t.Fatalf("expected gemini-3.6-flash target, got %q", target)
 	}
 }
