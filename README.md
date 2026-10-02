@@ -1,41 +1,35 @@
 # Victor AI Go CLI Chatbot
 
-A terminal-based personal chatbot built in Go using [Bubble Tea](https://github.com/charmbracelet/bubbletea) for a rich, interactive text user interface (TUI). It supports both **Google Gemini** and **Groq** backends with real-time markdown-rendered streaming output using [Glamour](https://github.com/charmbracelet/glamour).
+A fast, interactive terminal-based personal chatbot and HTTP API server built in Go using [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Glamour](https://github.com/charmbracelet/glamour).
 
 ---
 
 ## Features
 
-- **Interactive Terminal UI**: Scrollable chat viewport, responsive resizing, and multiline-ready textarea built with Bubble Tea.
-- **Multiple AI Backends**:
-  - **Google Gemini** (using the new `google.golang.org/genai` client).
-  - **Groq** (using an OpenAI-compatible stream client with `github.com/sashabaranov/go-openai`).
-- **Live Markdown Streaming**: View answers typed out in real-time with technical syntax highlighting.
-- **Automatic Environment Configuration**: Loads your keys from a `.env` file on startup.
+- **Fluid Terminal UI**: Scrollable chat viewport, responsive resizing, and textarea built with Bubble Tea.
+- **Ultra-Fast Zero-Latency Streaming**: Chunks stream in real-time with zero CPU lag, followed by Glamour syntax-highlighted Markdown rendering when complete.
+- **Multi-Turn Chat Memory**: Remembers context across conversation turns within the session.
+- **Unified Standard LLM Architecture**: Connects to any standard OpenAI-compatible provider (Groq, NVIDIA, DeepSeek, OpenAI, Ollama, etc.).
+- **OpenAI-Compatible HTTP API**: Serves `/v1/chat/completions` (JSON and SSE streaming), `/v1/models`, and `/health`.
+- **Cancellation & Safety**: In-flight requests can be cancelled cleanly with `Esc` or `Ctrl+C`.
 
 ---
 
 ## Installation & Setup
 
-### Prerequisites
+### 1. Configuration (.env)
 
-- [Go](https://go.dev/doc/install) (version 1.26.5 or later recommended)
-
-### 1. Clone & Set Up Configuration
-
-Create a `.env` file in the root of the project (one is generated automatically for you as `.env`):
+Set your chosen provider's credentials in `.env`:
 
 ```env
-GEMINI_API_KEY="your-gemini-api-key-here"
-GROQ_API_KEY="your-groq-api-key-here"
-CHAT_MODEL="gemini" # Set to "groq" or any GroqCloud model ID for the CLI.
+LLM_API_KEY="your-api-key"
+LLM_BASE_URL="https://api.groq.com/openai/v1"   # Optional: defaults to provider's standard base URL
+LLM_MODEL="llama-3.3-70b-versatile"            # The model to use
 ```
 
-> **Note**: `.env` is already configured in `.gitignore` to prevent you from accidentally committing your API secrets.
+*(Legacy variables like `GROQ_API_KEY`, `NVIDIA_API_KEY`, and `OPENAI_API_KEY` are also automatically detected as fallbacks.)*
 
 ### 2. Build the Application
-
-Build the executable:
 
 ```bash
 go build -o personalchatbot .
@@ -45,71 +39,33 @@ go build -o personalchatbot .
 
 ## Usage
 
-### Run with Default Settings
-Run the application directly. It will read settings from your `.env` file:
+### Run TUI Chatbot
 
 ```bash
 ./personalchatbot
 ```
 
-### Overriding the Model at Runtime
-You can override the configured default model by using the `--model` CLI flag:
-
+Override model at startup:
 ```bash
-# Run using Gemini
-./personalchatbot --model gemini
-
-# Run using the default Groq model (openai/gpt-oss-20b)
-./personalchatbot --model groq
-
-# Run using a specific Groq model
-./personalchatbot --model openai/gpt-oss-20b
+./personalchatbot --model your-model-name
 ```
 
 ### Controls in TUI
-- **Type messages**: Simply start typing in the lower text area.
-- **Send Message**: Press `Ctrl + S` to send your message to the assistant.
-- **Switch Models**:
-  - Press **`Ctrl + M`** to cycle through all available models across active providers in real-time.
-  - Type **`/model <name>`** (e.g. `/model gemini-3.6-flash`, `/model deepseek-v4-flash`, `/model groq`, `/model nvidia`) and press `Ctrl + S` to switch to a specific model.
-  - Type **`/models`** or **`/list`** and press `Ctrl + S` to list all available models and active providers.
-- **Normal Mode**: Press `Esc` to toggle normal mode (`c` to copy last code block, `y` to copy last AI response, `i` to resume typing).
-- **Scroll Viewport**: Use your mouse scroll wheel or click-drag to scroll through the conversation history.
-- **Quit**: Press `Ctrl + C` or type `exit` / `quit` and press `Ctrl + S`.
+- **Send Message**: `Ctrl + S`
+- **Multi-line Input**: Press `Enter` for new lines
+- **Cancel In-Flight Request**: `Esc` or `Ctrl + C` while waiting/streaming
+- **Reset Chat Memory**: Type `/clear` or `/reset` and press `Ctrl + S`
+- **Copy Response / Code**: Press `Esc` for normal mode (`c` to copy last code block, `y` to copy response, `i` to resume typing)
+- **Quit**: `Ctrl + C` (when not waiting) or type `exit`
 
-### HTTP API
-
-The app exposes an OpenAI-compatible HTTP API when started with `--api`. Endpoints:
-- **POST `/v1/chat/completions`** — OpenAI-compatible completion (JSON request/response). Supports dynamic model switching per request (`"model": "deepseek-v4-flash-0731"`, `"model": "gemini-3.6-flash"`, etc. or prefixed like `"model": "nvidia/..."`).
-- **POST or GET `/v1/chat/stream`** — SSE streaming endpoint. POST accepts a ChatCompletion request body (`stream=true`) to stream model deltas as SSE; GET supports a simple `?message=` demo.
-- **GET `/v1/models`** — OpenAI-compatible endpoint listing available models for active providers.
-- **GET `/health`** — Health check (returns `{"status":"ok", "providers":[...], "default_model":"..."}`).
-
-#### Model & Provider Switching
-The API dynamically routes requests to the correct provider based on the `"model"` field in the JSON request body. Supported environment variables:
-- **DeepSeek/NVIDIA Build**: `NVIDIA_API_KEY` (model `deepseek-ai/deepseek-v4-flash-0731` or alias `deepseek-v4-flash-0731`)
-- **Google Gemini**: `GEMINI_API_KEY` or `GOOGLE_API_KEY` (models like `gemini-3.6-flash`, `gemini-2.5-flash`)
-- **Groq**: `GROQ_API_KEY` (model `mixtral-8x7b-32768`)
-- **NVIDIA**: `NVIDIA_API_KEY` (models like `nvidia/nemotron-3.5-lightning-30b-a3b`)
-
-NVIDIA is not used as a hardcoded default. You can set `CHAT_MODEL` in your `.env` to specify your preferred default model.
-
-Example:
+### Start HTTP API Server
 
 ```bash
-# Start API server (default :8080)
-DEEPSEEK_API_KEY=... GEMINI_API_KEY=... go run main.go --api
-
-# List available models
-curl http://localhost:8080/v1/models
-
-# Request completion with DeepSeek V4 Flash
-curl -X POST -H "Content-Type: application/json" \
-  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Hello"}]}' \
-  http://localhost:8080/v1/chat/completions
-
-# Switch models dynamically for a different task (e.g. Gemini)
-curl -X POST -H "Content-Type: application/json" \
-  -d '{"model":"gemini-3.6-flash","messages":[{"role":"user","content":"Compare Go and Rust"}]}' \
-  http://localhost:8080/v1/chat/completions
+./personalchatbot --api --api-addr :8080
 ```
+
+#### API Endpoints
+- **POST `/v1/chat/completions`** — OpenAI-compatible JSON or SSE streaming (`"stream": true`).
+- **GET `/v1/models`** — Lists active model.
+- **GET `/health`** — Health check.
+

@@ -1,14 +1,12 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -17,7 +15,7 @@ import (
 	"personalchatbot/provider"
 )
 
-// Minimal OpenAI-compatible request types (subset)
+// Minimal OpenAI-compatible request types
 type ChatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -36,14 +34,6 @@ type ChatCompletionRequest struct {
 	Stream           bool          `json:"stream,omitempty"`
 }
 
-func writeSSEData(w http.ResponseWriter, value string) {
-	encoded, _ := json.Marshal(value)
-	fmt.Fprintf(w, "data: %s\n\n", encoded)
-}
-
-// getDefaultModel retrieves default model from environment or defaults to the
-// current NVIDIA Build DeepSeek V4 Flash release.
-
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	log.Printf("API error status=%d msg=%s", status, msg)
 	w.Header().Set("Content-Type", "application/json")
@@ -55,213 +45,6 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 			"code":    status,
 		},
 	})
-}
-
-func getDefaultModel() string {
-	if m := os.Getenv("CHAT_MODEL"); m != "" {
-		return m
-	}
-	if m := os.Getenv("DEFAULT_MODEL"); m != "" {
-		return m
-	}
-	if os.Getenv("GROQ_API_KEY") != "" {
-		return "groq"
-	}
-	if os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "" {
-		return "gemini"
-	}
-	if os.Getenv("NVIDIA_API_KEY") != "" {
-		return provider.NvidiaDeepSeekV4Flash
-	}
-	if os.Getenv("DEEPSEEK_API_KEY") != "" {
-		return "deepseek-v4-flash"
-	}
-	return "deepseek-v4-flash"
-}
-
-type ProviderRegistry struct {
-	mu        sync.RWMutex
-	providers map[string]provider.Provider
-}
-
-func NewProviderRegistry() *ProviderRegistry {
-	reg := &ProviderRegistry{
-		providers: make(map[string]provider.Provider),
-	}
-
-	if os.Getenv("GROQ_API_KEY") != "" {
-		p, err := provider.NewGroqProviderFromEnv()
-		if err != nil {
-			log.Printf("failed to init Groq provider: %v", err)
-		} else {
-			reg.providers["groq"] = p
-			log.Printf("Groq provider initialized")
-		}
-	}
-
-	if os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "" {
-		p, err := provider.NewGeminiProviderFromEnv()
-		if err != nil {
-			log.Printf("failed to init Gemini provider: %v", err)
-		} else {
-			reg.providers["gemini"] = p
-			log.Printf("Gemini provider initialized")
-		}
-	}
-
-	if os.Getenv("DEEPSEEK_API_KEY") != "" {
-		p, err := provider.NewDeepSeekProviderFromEnv()
-		if err != nil {
-			log.Printf("failed to init DeepSeek provider: %v", err)
-		} else {
-			reg.providers["deepseek"] = p
-			log.Printf("DeepSeek provider initialized")
-		}
-	}
-
-	if os.Getenv("NVIDIA_API_KEY") != "" {
-		p, err := provider.NewNvidiaProviderFromEnv()
-		if err != nil {
-			log.Printf("failed to init NVIDIA provider: %v", err)
-		} else {
-			reg.providers["nvidia"] = p
-			log.Printf("NVIDIA provider initialized")
-		}
-	}
-
-	return reg
-}
-
-func (reg *ProviderRegistry) ProviderNames() []string {
-	reg.mu.RLock()
-	defer reg.mu.RUnlock()
-	var names []string
-	for k := range reg.providers {
-		names = append(names, k)
-	}
-	return names
-}
-
-func (reg *ProviderRegistry) ResolveProvider(requestedModel string) (provider.Provider, string, error) {
-	reg.mu.RLock()
-	defer reg.mu.RUnlock()
-
-	if len(reg.providers) == 0 {
-		return nil, "", fmt.Errorf("no AI providers configured. Please set DEEPSEEK_API_KEY, GEMINI_API_KEY, GROQ_API_KEY, or NVIDIA_API_KEY")
-	}
-
-	if requestedModel == "" {
-		requestedModel = getDefaultModel()
-	}
-
-	modelLower := strings.ToLower(strings.TrimSpace(requestedModel))
-
-	if modelLower == "gemini" || strings.HasPrefix(modelLower, "gemini") {
-		if p, ok := reg.providers["gemini"]; ok {
-			if strings.TrimSpace(requestedModel) == "gemini" || strings.TrimSpace(requestedModel) == "" {
-				return p, "gemini-3.6-flash", nil
-			}
-			return p, requestedModel, nil
-		}
-	}
-
-	if modelLower == "groq" || strings.HasPrefix(modelLower, "groq") || strings.Contains(modelLower, "gpt-oss") {
-		if p, ok := reg.providers["groq"]; ok {
-			if modelLower == "groq" {
-				return p, "openai/gpt-oss-20b", nil
-			}
-			return p, requestedModel, nil
-		}
-	}
-
-	if p, ok := reg.providers["nvidia"]; ok {
-		if strings.Contains(modelLower, "deepseek") || strings.Contains(modelLower, "v4-flash") || strings.Contains(modelLower, "v4") {
-			return p, provider.NvidiaDeepSeekV4Flash, nil
-		}
-		if strings.Contains(modelLower, "nemotron") || strings.Contains(modelLower, "nvidia") {
-			return p, "nvidia/nemotron-3.5-lightning-30b-a3b", nil
-		}
-	}
-
-	if p, ok := reg.providers["deepseek"]; ok {
-		if strings.Contains(modelLower, "deepseek") || strings.Contains(modelLower, "v4-flash") {
-			return p, provider.NormalizeDeepSeekModelForNVIDIA(requestedModel), nil
-		}
-	}
-
-	if p, ok := reg.providers["gemini"]; ok {
-		if strings.Contains(modelLower, "gemini") {
-			return p, requestedModel, nil
-		}
-	}
-
-	if p, ok := reg.providers["groq"]; ok {
-		if strings.Contains(modelLower, "groq") || strings.Contains(modelLower, "gpt-oss") {
-			return p, requestedModel, nil
-		}
-	}
-
-	return nil, "", fmt.Errorf("model not available: %s (configured providers: %v)", requestedModel, sortedProviderNames(reg.providers))
-}
-
-func sortedProviderNames(providers map[string]provider.Provider) []string {
-	keys := make([]string, 0, len(providers))
-	for k := range providers {
-		keys = append(keys, k)
-	}
-	return keys
-}
-
-func (reg *ProviderRegistry) ListModels() []map[string]interface{} {
-	reg.mu.RLock()
-	defer reg.mu.RUnlock()
-
-	var models []map[string]interface{}
-	now := time.Now().Unix()
-
-	if _, ok := reg.providers["gemini"]; ok {
-		models = append(models, map[string]interface{}{
-			"id":       "gemini-3.6-flash",
-			"object":   "model",
-			"created":  now,
-			"owned_by": "google",
-		})
-	}
-
-	if _, ok := reg.providers["groq"]; ok {
-		models = append(models, map[string]interface{}{
-			"id":       "openai/gpt-oss-20b",
-			"object":   "model",
-			"created":  now,
-			"owned_by": "groq",
-		})
-	}
-
-	if _, ok := reg.providers["deepseek"]; ok {
-		models = append(models, map[string]interface{}{
-			"id":       "deepseek-v4-flash",
-			"object":   "model",
-			"created":  now,
-			"owned_by": "deepseek",
-		})
-	}
-
-	if _, ok := reg.providers["nvidia"]; ok {
-		nvidiaModels := []string{
-			provider.NvidiaDeepSeekV4Flash,
-			"nvidia/nemotron-3.5-lightning-30b-a3b",
-		}
-		for _, m := range nvidiaModels {
-			models = append(models, map[string]interface{}{
-				"id":       m,
-				"object":   "model",
-				"created":  now,
-				"owned_by": "nvidia",
-			})
-		}
-	}
-
-	return models
 }
 
 type HistoryStore struct {
@@ -341,34 +124,10 @@ func requireAuth(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-func writeProviderError(w http.ResponseWriter, err error) {
-	if err == nil {
-		return
-	}
-	msg := err.Error()
-	lower := strings.ToLower(msg)
-	status := http.StatusInternalServerError
-	if strings.Contains(lower, "model_not_found") ||
-		strings.Contains(lower, "404") ||
-		strings.Contains(lower, "410") ||
-		strings.Contains(lower, "gone") ||
-		strings.Contains(lower, "end of life") ||
-		strings.Contains(lower, "not found") ||
-		strings.Contains(lower, "invalid model") {
-		status = http.StatusBadRequest
-	}
-	if strings.Contains(lower, "401") || strings.Contains(lower, "unauthorized") || strings.Contains(lower, "invalid api key") || strings.Contains(lower, "authentication") {
-		status = http.StatusUnauthorized
-	}
-	writeJSONError(w, status, msg)
-}
-
-func startServer(addr string) {
+func startServer(addr string, prov provider.Provider) {
 	if addr == "" {
 		addr = ":8080"
 	}
-
-	reg := NewProviderRegistry()
 
 	mux := http.NewServeMux()
 
@@ -376,9 +135,8 @@ func startServer(addr string) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":        "ok",
-			"providers":     reg.ProviderNames(),
-			"default_model": getDefaultModel(),
+			"status": "ok",
+			"model":  prov.ModelName(),
 		})
 	}))
 
@@ -393,7 +151,14 @@ func startServer(addr string) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"object": "list",
-			"data":   reg.ListModels(),
+			"data": []map[string]interface{}{
+				{
+					"id":       prov.ModelName(),
+					"object":   "model",
+					"created":  time.Now().Unix(),
+					"owned_by": "llm",
+				},
+			},
 		})
 	}))
 
@@ -440,25 +205,29 @@ func startServer(addr string) {
 			return
 		}
 
-		if req.Model == "" {
-			req.Model = getDefaultModel()
-		}
-
-		if provider.IsDeepSeekV4Flash(req.Model) {
-			req.Stream = false
-		}
-
-		prov, targetModel, err := reg.ResolveProvider(req.Model)
-		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "model resolution failed: "+err.Error())
-			return
-		}
-
-		log.Printf("chat/completions model=%q target=%q stream=%v messages=%d", req.Model, targetModel, req.Stream, len(req.Messages))
-
 		if len(req.Messages) == 0 {
 			writeJSONError(w, http.StatusBadRequest, "messages array is required and must not be empty")
 			return
+		}
+
+		targetModel := req.Model
+		if targetModel == "" {
+			targetModel = prov.ModelName()
+		}
+
+		openReq := openai.ChatCompletionRequest{
+			Model:            targetModel,
+			Temperature:      req.Temperature,
+			TopP:             req.TopP,
+			MaxTokens:        req.MaxTokens,
+			N:                req.N,
+			Stop:             req.Stop,
+			PresencePenalty:  req.PresencePenalty,
+			FrequencyPenalty: req.FrequencyPenalty,
+			Stream:           req.Stream,
+		}
+		for _, m := range req.Messages {
+			openReq.Messages = append(openReq.Messages, openai.ChatCompletionMessage{Role: m.Role, Content: m.Content})
 		}
 
 		if req.Stream {
@@ -472,140 +241,85 @@ func startServer(addr string) {
 				return
 			}
 
-			openReq := openai.ChatCompletionRequest{
-				Model:            targetModel,
-				Temperature:      req.Temperature,
-				TopP:             req.TopP,
-				MaxTokens:        req.MaxTokens,
-				N:                req.N,
-				Stop:             req.Stop,
-				PresencePenalty:  req.PresencePenalty,
-				FrequencyPenalty: req.FrequencyPenalty,
-				Stream:           true,
+			stream, err := prov.CreateChatCompletionStream(r.Context(), openReq)
+			if err != nil {
+				log.Printf("stream error: %v", err)
+				fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+				flusher.Flush()
+				return
 			}
-			for _, m := range req.Messages {
-				openReq.Messages = append(openReq.Messages, openai.ChatCompletionMessage{Role: m.Role, Content: m.Content})
-			}
+			defer stream.Close()
 
-			if prov != nil {
-				stream, err := prov.CreateChatCompletionStream(context.Background(), openReq)
+			chunkID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+			created := time.Now().Unix()
+
+			for {
+				chunk, err := stream.Recv()
 				if err != nil {
-					if err == provider.ErrNotSupported {
-						openReq.Stream = false
-						resp, err2 := prov.CreateChatCompletion(context.Background(), openReq)
-						if err2 != nil {
-							log.Printf("non-stream fallback failed: %v", err2)
-							fmt.Fprintf(w, "event: error\ndata: %s\n\n", err2.Error())
-							flusher.Flush()
-							return
-						}
-						if len(resp.Choices) > 0 {
-							writeSSEData(w, resp.Choices[0].Content)
-							flusher.Flush()
-						}
-						fmt.Fprintf(w, "data: [DONE]\n\n")
-						flusher.Flush()
-						return
+					if err == io.EOF {
+						break
 					}
-					log.Printf("stream error: %v", err)
 					fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
 					flusher.Flush()
 					return
 				}
-				defer stream.Close()
-
-				for {
-					chunk, err := stream.Recv()
-					if err != nil {
-						if err == io.EOF {
-							break
-						}
-						fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
-						flusher.Flush()
-						return
+				if chunk.Content != "" {
+					chunkData := map[string]interface{}{
+						"id":      chunkID,
+						"object":  "chat.completion.chunk",
+						"created": created,
+						"model":   targetModel,
+						"choices": []map[string]interface{}{
+							{
+								"index": 0,
+								"delta": map[string]string{
+									"content": chunk.Content,
+								},
+								"finish_reason": nil,
+							},
+						},
 					}
-					if chunk.Content != "" {
-						writeSSEData(w, chunk.Content)
-						flusher.Flush()
-					}
+					encoded, _ := json.Marshal(chunkData)
+					fmt.Fprintf(w, "data: %s\n\n", encoded)
+					flusher.Flush()
 				}
-
-				fmt.Fprintf(w, "data: [DONE]\n\n")
-				flusher.Flush()
-				return
 			}
 
-			writeSSEData(w, "(no provider)")
-			flusher.Flush()
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
 			return
 		}
 
-		if prov != nil {
-			openReq := openai.ChatCompletionRequest{
-				Model:            targetModel,
-				Temperature:      req.Temperature,
-				TopP:             req.TopP,
-				MaxTokens:        req.MaxTokens,
-				N:                req.N,
-				Stop:             req.Stop,
-				PresencePenalty:  req.PresencePenalty,
-				FrequencyPenalty: req.FrequencyPenalty,
-				Stream:           false,
-			}
-			for _, m := range req.Messages {
-				openReq.Messages = append(openReq.Messages, openai.ChatCompletionMessage{Role: m.Role, Content: m.Content})
-			}
-
-			resp, err := prov.CreateChatCompletion(context.Background(), openReq)
-			if err != nil {
-				log.Printf("provider CreateChatCompletion failed model=%q: %v", targetModel, err)
-				writeProviderError(w, err)
-				return
-			}
-
-			out := map[string]interface{}{
-				"id":      resp.ID,
-				"object":  resp.Object,
-				"created": resp.Created,
-				"model":   targetModel,
-				"choices": []map[string]interface{}{},
-				"usage":   resp.Usage,
-			}
-			for i, ch := range resp.Choices {
-				choice := map[string]interface{}{
-					"index": i,
-					"message": map[string]string{
-						"role":    ch.Role,
-						"content": ch.Content,
-					},
-					"finish_reason": ch.FinishReason,
-				}
-				out["choices"] = append(out["choices"].([]map[string]interface{}), choice)
-			}
-
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(out)
+		resp, err := prov.CreateChatCompletion(r.Context(), openReq)
+		if err != nil {
+			log.Printf("provider CreateChatCompletion failed model=%q: %v", targetModel, err)
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
-		userContent := ""
-		if len(req.Messages) > 0 {
-			userContent = req.Messages[len(req.Messages)-1].Content
+		out := map[string]interface{}{
+			"id":      resp.ID,
+			"object":  resp.Object,
+			"created": resp.Created,
+			"model":   targetModel,
+			"choices": []map[string]interface{}{},
+			"usage":   resp.Usage,
 		}
-		reply := fmt.Sprintf("Echo: %s", userContent)
-		resp := map[string]interface{}{
-			"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
-			"object":  "chat.completion",
-			"created": time.Now().Unix(),
-			"choices": []map[string]interface{}{{"index": 0, "message": map[string]string{"role": "assistant", "content": reply}, "finish_reason": "stop"}},
-			"usage":   map[string]int{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+		for i, ch := range resp.Choices {
+			choice := map[string]interface{}{
+				"index": i,
+				"message": map[string]string{
+					"role":    ch.Role,
+					"content": ch.Content,
+				},
+				"finish_reason": ch.FinishReason,
+			}
+			out["choices"] = append(out["choices"].([]map[string]interface{}), choice)
 		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(out)
 	}))
 
 	mux.HandleFunc("/v1/chat/stream", withCORS(func(w http.ResponseWriter, r *http.Request) {
@@ -617,7 +331,7 @@ func startServer(addr string) {
 		if r.Method == http.MethodGet {
 			msg = r.URL.Query().Get("message")
 			if msg == "" {
-				msg = "This is a demo stream from the Personal Chat Bot API."
+				msg = "Hello from Personal Chat Bot API."
 			}
 		} else if r.Method == http.MethodPost {
 			if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
@@ -637,18 +351,9 @@ func startServer(addr string) {
 			return
 		}
 
-		if reqBody.Model == "" {
-			reqBody.Model = getDefaultModel()
-		}
-
-		if provider.IsDeepSeekV4Flash(reqBody.Model) {
-			reqBody.Stream = false
-		}
-
-		prov, targetModel, err := reg.ResolveProvider(reqBody.Model)
-		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "model resolution failed: "+err.Error())
-			return
+		targetModel := reqBody.Model
+		if targetModel == "" {
+			targetModel = prov.ModelName()
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -661,84 +366,61 @@ func startServer(addr string) {
 			return
 		}
 
-		if prov != nil {
-			openReq := openai.ChatCompletionRequest{
-				Model:  targetModel,
-				Stream: !provider.IsDeepSeekV4Flash(targetModel),
+		openReq := openai.ChatCompletionRequest{
+			Model:  targetModel,
+			Stream: true,
+		}
+		if len(reqBody.Messages) > 0 {
+			for _, m := range reqBody.Messages {
+				openReq.Messages = append(openReq.Messages, openai.ChatCompletionMessage{Role: m.Role, Content: m.Content})
 			}
-			if len(reqBody.Messages) > 0 {
-				for _, m := range reqBody.Messages {
-					openReq.Messages = append(openReq.Messages, openai.ChatCompletionMessage{Role: m.Role, Content: m.Content})
-				}
-			} else {
-				openReq.Messages = []openai.ChatCompletionMessage{{Role: "user", Content: msg}}
-			}
+		} else {
+			openReq.Messages = []openai.ChatCompletionMessage{{Role: "user", Content: msg}}
+		}
 
-			if provider.IsDeepSeekV4Flash(targetModel) || !openReq.Stream {
-				openReq.Stream = false
-				resp, err2 := prov.CreateChatCompletion(context.Background(), openReq)
-				if err2 != nil {
-					log.Printf("stream-endpoint non-stream failed: %v", err2)
-					fmt.Fprintf(w, "event: error\ndata: %s\n\n", err2.Error())
-					flusher.Flush()
-					return
-				}
-				if len(resp.Choices) > 0 {
-					writeSSEData(w, resp.Choices[0].Content)
-					flusher.Flush()
-				}
-				fmt.Fprintf(w, "data: [DONE]\n\n")
-				flusher.Flush()
-				return
-			}
+		stream, err := prov.CreateChatCompletionStream(r.Context(), openReq)
+		if err != nil {
+			fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+			flusher.Flush()
+			return
+		}
+		defer stream.Close()
 
-			stream, err := prov.CreateChatCompletionStream(context.Background(), openReq)
+		chunkID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+		created := time.Now().Unix()
+
+		for {
+			chunk, err := stream.Recv()
 			if err != nil {
-				if err == provider.ErrNotSupported {
-					openReq.Stream = false
-					resp, err2 := prov.CreateChatCompletion(context.Background(), openReq)
-					if err2 != nil {
-						fmt.Fprintf(w, "event: error\ndata: %s\n\n", err2.Error())
-						flusher.Flush()
-						return
-					}
-					if len(resp.Choices) > 0 {
-						writeSSEData(w, resp.Choices[0].Content)
-						flusher.Flush()
-					}
-					fmt.Fprintf(w, "data: [DONE]\n\n")
-					flusher.Flush()
-					return
+				if err == io.EOF {
+					break
 				}
 				fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
 				flusher.Flush()
 				return
 			}
-			defer stream.Close()
-
-			for {
-				chunk, err := stream.Recv()
-				if err != nil {
-					if err == io.EOF {
-						break
-					}
-					fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
-					flusher.Flush()
-					return
+			if chunk.Content != "" {
+				chunkData := map[string]interface{}{
+					"id":      chunkID,
+					"object":  "chat.completion.chunk",
+					"created": created,
+					"model":   targetModel,
+					"choices": []map[string]interface{}{
+						{
+							"index": 0,
+							"delta": map[string]string{
+								"content": chunk.Content,
+							},
+							"finish_reason": nil,
+						},
+					},
 				}
-				if chunk.Content != "" {
-					writeSSEData(w, chunk.Content)
-					flusher.Flush()
-				}
+				encoded, _ := json.Marshal(chunkData)
+				fmt.Fprintf(w, "data: %s\n\n", encoded)
+				flusher.Flush()
 			}
-
-			fmt.Fprintf(w, "data: [DONE]\n\n")
-			flusher.Flush()
-			return
 		}
 
-		writeSSEData(w, msg)
-		flusher.Flush()
 		fmt.Fprintf(w, "data: [DONE]\n\n")
 		flusher.Flush()
 	}))
@@ -746,9 +428,11 @@ func startServer(addr string) {
 	addrToUse := addr
 	if env := os.Getenv("API_ADDR"); env != "" {
 		addrToUse = env
+	} else if port := os.Getenv("PORT"); port != "" {
+		addrToUse = ":" + port
 	}
 
-	log.Printf("Starting HTTP API server on %s", addrToUse)
+	log.Printf("Starting HTTP API server on %s with model %s", addrToUse, prov.ModelName())
 	if err := http.ListenAndServe(addrToUse, mux); err != nil {
 		log.Fatalf("API server failed: %v", err)
 	}

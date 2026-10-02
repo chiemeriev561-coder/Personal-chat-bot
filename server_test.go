@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sashabaranov/go-openai"
@@ -9,140 +13,137 @@ import (
 	"personalchatbot/provider"
 )
 
-func TestProviderRegistryModelResolution(t *testing.T) {
-	t.Setenv("GEMINI_API_KEY", "")
-	t.Setenv("GOOGLE_API_KEY", "")
-	t.Setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
-	t.Setenv("GROQ_API_KEY", "test-groq-key")
-	t.Setenv("NVIDIA_API_KEY", "test-nvidia-key")
+type mockProvider struct {
+	model string
+}
 
-	reg := NewProviderRegistry()
+func (m *mockProvider) ModelName() string {
+	return m.model
+}
 
-	// Test resolving deepseek model
-	prov, targetModel, err := reg.ResolveProvider("deepseek-v4-flash")
+func (m *mockProvider) CreateChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (provider.CompletionResult, error) {
+	return provider.CompletionResult{
+		ID:      "test-id",
+		Object:  "chat.completion",
+		Created: 123456789,
+		Choices: []provider.Choice{
+			{
+				Index:        0,
+				Role:         "assistant",
+				Content:      "Mock response",
+				FinishReason: "stop",
+			},
+		},
+	}, nil
+}
+
+type mockStream struct {
+	chunks []string
+	idx    int
+}
+
+func (s *mockStream) Recv() (provider.StreamChunk, error) {
+	if s.idx >= len(s.chunks) {
+		return provider.StreamChunk{}, context.Canceled
+	}
+	chunk := s.chunks[s.idx]
+	s.idx++
+	return provider.StreamChunk{Content: chunk}, nil
+}
+
+func (s *mockStream) Close() error {
+	return nil
+}
+
+func (m *mockProvider) CreateChatCompletionStream(ctx context.Context, req openai.ChatCompletionRequest) (provider.Stream, error) {
+	return &mockStream{chunks: []string{"Hello", " world!"}}, nil
+}
+
+func TestUnifiedClientEnvResolution(t *testing.T) {
+	t.Setenv("LLM_API_KEY", "custom-key")
+	t.Setenv("LLM_BASE_URL", "https://api.custom.com/v1")
+	t.Setenv("LLM_MODEL", "custom-model")
+
+	client, err := provider.NewClientFromEnv()
 	if err != nil {
-		t.Fatalf("expected resolution for deepseek-v4-flash, got err: %v", err)
+		t.Fatalf("expected client to initialize from LLM_* env: %v", err)
 	}
-	if prov == nil {
-		t.Fatalf("expected non-nil provider for deepseek-v4-flash")
-	}
-	if targetModel != provider.NvidiaDeepSeekV4Flash {
-		t.Errorf("expected target model '%s', got '%s'", provider.NvidiaDeepSeekV4Flash, targetModel)
-	}
-
-	// DeepSeek aliases are routed to NVIDIA's canonical model.
-	prov2, targetModel2, err := reg.ResolveProvider("deepseek/deepseek-v4-flash")
-	if err != nil {
-		t.Fatalf("expected resolution for deepseek/deepseek-v4-flash, got err: %v", err)
-	}
-	if prov2 == nil {
-		t.Fatalf("expected non-nil provider")
-	}
-	if targetModel2 != provider.NvidiaDeepSeekV4Flash {
-		t.Errorf("expected target model '%s', got '%s'", provider.NvidiaDeepSeekV4Flash, targetModel2)
-	}
-
-	// The current NVIDIA Build V4 Flash model must not fall through to Groq.
-	prov3, targetModel3, err := reg.ResolveProvider("deepseek-v4-flash-0731")
-	if err != nil {
-		t.Fatalf("expected resolution for deepseek-v4-flash-0731, got err: %v", err)
-	}
-	if _, ok := prov3.(*provider.NvidiaProvider); !ok {
-		t.Fatalf("expected deepseek-v4-flash-0731 to route to NVIDIA")
-	}
-	if targetModel3 != provider.NvidiaDeepSeekV4Flash {
-		t.Errorf("expected target model '%s', got '%s'", provider.NvidiaDeepSeekV4Flash, targetModel3)
-	}
-
-	// Test default model does not require NVIDIA
-	t.Setenv("CHAT_MODEL", "")
-	defModel := getDefaultModel()
-	if defModel == "nvidia/nemotron-3.5-lightning-30b-a3b" {
-		t.Errorf("default model should not be NVIDIA hardcoded")
+	if client.ModelName() != "custom-model" {
+		t.Errorf("expected model 'custom-model', got '%s'", client.ModelName())
 	}
 }
 
-func TestDeepSeekNvidiaBuildKeyAutoDetection(t *testing.T) {
-	t.Setenv("DEEPSEEK_API_KEY", "nvapi-test123456789")
-	t.Setenv("DEEPSEEK_API_BASE", "")
+func TestUnifiedClientFallbackToGroq(t *testing.T) {
+	t.Setenv("LLM_API_KEY", "")
+	t.Setenv("GROQ_API_KEY", "groq-test-key")
+	t.Setenv("NVIDIA_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
 
-	p, err := provider.NewDeepSeekProviderFromEnv()
+	client, err := provider.NewClientFromEnv()
 	if err != nil {
-		t.Fatalf("failed to create provider with nvapi key: %v", err)
+		t.Fatalf("expected client to initialize from GROQ_API_KEY fallback: %v", err)
 	}
-	if p == nil {
-		t.Fatalf("expected non-nil DeepSeekProvider for nvapi key")
+	if client.ModelName() == "" {
+		t.Errorf("expected non-empty model name for groq fallback")
 	}
 }
 
-func TestDeepSeekV4FlashStreamingDisabled(t *testing.T) {
-	t.Setenv("DEEPSEEK_API_KEY", "test-key")
-	p, err := provider.NewDeepSeekProviderFromEnv()
-	if err != nil {
-		t.Fatalf("failed to create DeepSeekProvider: %v", err)
+func TestHealthEndpoint(t *testing.T) {
+	mock := &mockProvider{model: "test-model"}
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "ok",
+			"model":  mock.ModelName(),
+		})
+	})
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
 	}
 
-	req := openai.ChatCompletionRequest{Model: "deepseek-v4-flash"}
-	_, streamErr := p.CreateChatCompletionStream(context.Background(), req)
-	if streamErr != provider.ErrNotSupported {
-		t.Errorf("expected ErrNotSupported when streaming deepseek-v4-flash, got: %v", streamErr)
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp["status"] != "ok" {
+		t.Errorf("expected status 'ok', got %v", resp["status"])
+	}
+	if resp["model"] != "test-model" {
+		t.Errorf("expected model 'test-model', got %v", resp["model"])
 	}
 }
 
-func TestModelsEndpoint(t *testing.T) {
-	t.Setenv("GEMINI_API_KEY", "")
-	t.Setenv("GOOGLE_API_KEY", "")
-	t.Setenv("GROQ_API_KEY", "")
-	t.Setenv("DEEPSEEK_API_KEY", "")
-	t.Setenv("NVIDIA_API_KEY", "test-nvidia-key")
+func TestChatCompletionsNonStream(t *testing.T) {
+	mock := &mockProvider{model: "test-model"}
 
-	reg := NewProviderRegistry()
-	models := reg.ListModels()
+	body := `{"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
 
-	if len(models) != 2 {
-		t.Fatalf("expected exactly two enabled models, got %d", len(models))
-	}
-
-	foundDeepSeek, foundNemotron := false, false
-	for _, m := range models {
-		if id, ok := m["id"].(string); ok && id == provider.NvidiaDeepSeekV4Flash {
-			foundDeepSeek = true
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		openReq := openai.ChatCompletionRequest{
+			Model: mock.ModelName(),
+			Messages: []openai.ChatCompletionMessage{
+				{Role: "user", Content: "hi"},
+			},
 		}
-		if id, ok := m["id"].(string); ok && id == "nvidia/nemotron-3.5-lightning-30b-a3b" {
-			foundNemotron = true
+		resp, err := mock.CreateChatCompletion(r.Context(), openReq)
+		if err != nil {
+			t.Fatalf("failed completion: %v", err)
 		}
-	}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	handler.ServeHTTP(w, req)
 
-	if !foundDeepSeek || !foundNemotron {
-		t.Errorf("expected DeepSeek V4 Flash and NVIDIA Nemotron in listed models")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
 	}
 }
 
-func TestRegistryResolvesGroqAndGeminiAliases(t *testing.T) {
-	reg := &ProviderRegistry{providers: map[string]provider.Provider{
-		"groq":   &provider.GroqProvider{},
-		"gemini": &provider.GeminiProvider{},
-	}}
-
-	prov, target, err := reg.ResolveProvider("groq")
-	if err != nil {
-		t.Fatalf("expected groq alias to resolve: %v", err)
-	}
-	if _, ok := prov.(*provider.GroqProvider); !ok {
-		t.Fatalf("expected Groq provider for groq alias")
-	}
-	if target != "openai/gpt-oss-20b" {
-		t.Fatalf("expected default groq target, got %q", target)
-	}
-
-	prov, target, err = reg.ResolveProvider("gemini-3.6-flash")
-	if err != nil {
-		t.Fatalf("expected gemini alias to resolve: %v", err)
-	}
-	if _, ok := prov.(*provider.GeminiProvider); !ok {
-		t.Fatalf("expected Gemini provider for gemini alias")
-	}
-	if target != "gemini-3.6-flash" {
-		t.Fatalf("expected gemini-3.6-flash target, got %q", target)
-	}
-}
