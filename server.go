@@ -425,11 +425,15 @@ func startServer(addr string, prov provider.Provider) {
 		flusher.Flush()
 	}))
 
-	addrToUse := addr
+	addrToUse := ":8080"
+	if addr != "" {
+		addrToUse = addr
+	}
+	if port := os.Getenv("PORT"); port != "" {
+		addrToUse = ":" + port
+	}
 	if env := os.Getenv("API_ADDR"); env != "" {
 		addrToUse = env
-	} else if port := os.Getenv("PORT"); port != "" {
-		addrToUse = ":" + port
 	}
 
 	log.Printf("Starting HTTP API server on %s with model %s", addrToUse, prov.ModelName())

@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: personal-chat-bot
+    runtime: go
+    plan: free
+    buildCommand: go build -o personalchatbot .
+    startCommand: ./personalchatbot --api
+    healthCheckPath: /health
+    envVars:
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_BASE_URL
+        value: https://integrate.api.nvidia.com/v1
+      - key: LLM_MODEL
+        value: nvidia/nemotron-3.5-lightning-30b-a3b
