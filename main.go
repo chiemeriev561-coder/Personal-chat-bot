@@ -23,10 +23,7 @@ import (
 	"personalchatbot/provider"
 )
 
-const defaultGroqModel = "openai/gpt-oss-20b"
-
 // Messages for async Bubble Tea updates
-type streamChunkMsg string
 type streamStartMsg struct{ stream provider.Stream }
 type streamChunkWithStreamMsg struct {
 	content string
@@ -36,21 +33,22 @@ type streamDoneMsg struct{}
 type streamErrMsg struct{ err error }
 
 type model struct {
-	registry       *ProviderRegistry
-	prov           provider.Provider
-	modelName      string
-	viewport       viewport.Model
-	textarea       textarea.Model
-	spinner        spinner.Model
-	glamour        *glamour.TermRenderer
-	history        string
-	currentAi      string
-	lastAiResponse string
-	copyStatus     string
-	isWaiting      bool
-	width          int
-	height         int
-	providerName   string
+	prov            provider.Provider
+	modelName       string
+	viewport        viewport.Model
+	textarea        textarea.Model
+	spinner         spinner.Model
+	glamour         *glamour.TermRenderer
+	history         string
+	renderedHistory string
+	currentAi       string
+	lastAiResponse  string
+	copyStatus      string
+	isWaiting       bool
+	width           int
+	height          int
+	messages        []openai.ChatCompletionMessage
+	cancelFunc      context.CancelFunc
 }
 
 func newRenderer(width int) *glamour.TermRenderer {
@@ -66,6 +64,17 @@ func newRenderer(width int) *glamour.TermRenderer {
 		return nil
 	}
 	return renderer
+}
+
+func (m *model) renderMarkdown(md string) string {
+	if m.glamour == nil {
+		return md
+	}
+	rendered, err := m.glamour.Render(md)
+	if err != nil {
+		return md
+	}
+	return rendered
 }
 
 func parseLastCodeBlock(markdown string) string {
@@ -122,57 +131,13 @@ func (m model) copyToClipboard(text string, successMsg string) model {
 	return m
 }
 
-func (m model) cycleModel() model {
-	if m.registry == nil {
-		return m
-	}
-	modelsList := m.registry.ListModels()
-	if len(modelsList) == 0 {
-		return m
-	}
-
-	currIndex := -1
-	for i, item := range modelsList {
-		if id, ok := item["id"].(string); ok && id == m.modelName {
-			currIndex = i
-			break
-		}
-	}
-
-	nextIndex := (currIndex + 1) % len(modelsList)
-	nextModel, ok := modelsList[nextIndex]["id"].(string)
-	if !ok || nextModel == "" {
-		return m
-	}
-
-	prov, targetModel, err := m.registry.ResolveProvider(nextModel)
-	if err != nil {
-		m.copyStatus = "Failed to switch model: " + err.Error()
-		return m
-	}
-
-	m.prov = prov
-	m.modelName = targetModel
-	m.providerName = "Active"
-	if ownedBy, ok := modelsList[nextIndex]["owned_by"].(string); ok {
-		m.providerName = strings.Title(ownedBy)
-	}
-	m.copyStatus = fmt.Sprintf("Switched active model to: %s (%s)", m.modelName, m.providerName)
-	return m
-}
-
-func initialModel(reg *ProviderRegistry, selectedModel string) model {
+func initialModel(prov provider.Provider, selectedModel string) model {
 	if selectedModel == "" {
-		selectedModel = getDefaultModel()
-	}
-
-	prov, targetModel, err := reg.ResolveProvider(selectedModel)
-	if err != nil {
-		log.Fatalf("failed to resolve initial model: %v", err)
+		selectedModel = prov.ModelName()
 	}
 
 	ta := textarea.New()
-	ta.Placeholder = "Type a message... (Ctrl+S: send · Ctrl+M: switch model · /model <name> · Esc: normal mode)"
+	ta.Placeholder = "Type a message... (Ctrl+S: send · Esc: cancel / normal mode · /clear: reset chat)"
 	ta.Focus()
 	ta.CharLimit = 1000000
 	ta.SetWidth(80)
@@ -184,21 +149,39 @@ func initialModel(reg *ProviderRegistry, selectedModel string) model {
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
-	systemHeader := fmt.Sprintf("# Victor AI GO CLI Chatbot [%s]\n*Type your message below. Press Ctrl+M or use /model <name> to switch models. Press Ctrl+C to quit.*\n\n---\n", targetModel)
+	systemHeader := fmt.Sprintf("# Victor AI Chatbot [%s]\n*Type your message below. Press Ctrl+S to send. Type /clear to reset history. Press Ctrl+C to quit.*\n\n---\n", selectedModel)
 
-	m := model{
-		registry:     reg,
-		prov:         prov,
-		modelName:    targetModel,
-		textarea:     ta,
-		viewport:     vp,
-		spinner:      s,
-		glamour:      newRenderer(80),
-		history:      systemHeader,
-		providerName: "Active",
+	renderer := newRenderer(80)
+	var renderedHeader string
+	if renderer != nil {
+		if r, err := renderer.Render(systemHeader); err == nil {
+			renderedHeader = r
+		} else {
+			renderedHeader = systemHeader
+		}
+	} else {
+		renderedHeader = systemHeader
 	}
 
-	m.updateViewport()
+	m := model{
+		prov:            prov,
+		modelName:       selectedModel,
+		textarea:        ta,
+		viewport:        vp,
+		spinner:         s,
+		glamour:         renderer,
+		history:         systemHeader,
+		renderedHistory: renderedHeader,
+		messages: []openai.ChatCompletionMessage{
+			{
+				Role:    "system",
+				Content: "You are an expert developer assistant. Provide precise, idiomatic code examples and direct technical answers.",
+			},
+		},
+	}
+
+	m.viewport.SetContent(m.renderedHistory)
+	m.viewport.GotoBottom()
 	return m
 }
 
@@ -222,7 +205,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 
-		if !m.textarea.Focused() {
+		if !m.textarea.Focused() && !m.isWaiting {
 			switch msg.String() {
 			case "c":
 				code := parseLastCodeBlock(m.lastAiResponse)
@@ -244,9 +227,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.Type {
 		case tea.KeyCtrlC:
+			if m.isWaiting && m.cancelFunc != nil {
+				m.cancelFunc()
+				m.cancelFunc = nil
+				m.isWaiting = false
+				m.history += "\n*[Cancelled by user]*\n\n---\n"
+				m.renderedHistory = m.renderMarkdown(m.history)
+				m.currentAi = ""
+				m.updateViewport(false)
+				return m, nil
+			}
 			return m, tea.Quit
 
 		case tea.KeyEsc:
+			if m.isWaiting && m.cancelFunc != nil {
+				m.cancelFunc()
+				m.cancelFunc = nil
+				m.isWaiting = false
+				m.history += "\n*[Cancelled by user]*\n\n---\n"
+				m.renderedHistory = m.renderMarkdown(m.history)
+				m.currentAi = ""
+				m.updateViewport(false)
+				return m, nil
+			}
 			if m.textarea.Focused() {
 				m.textarea.Blur()
 				m.copyStatus = "Normal mode: 'c' to copy code, 'y' to copy response, 'i' to resume typing"
@@ -269,12 +272,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
-		case tea.KeyCtrlM:
-			m = m.cycleModel()
-			return m, nil
-
 		case tea.KeyCtrlS:
-			// Ctrl+S sends; Enter inserts a newline (handled natively by textarea)
 			if m.isWaiting {
 				return m, nil
 			}
@@ -287,50 +285,47 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 
-			// CLI Commands for model switching and model listing
-			if input == "/models" || input == "/list" {
+			if input == "/clear" || input == "/reset" {
 				m.textarea.Reset()
-				modelsList := m.registry.ListModels()
-				var sb strings.Builder
-				sb.WriteString("**System:** Available models and active providers:\n")
-				for _, item := range modelsList {
-					id := item["id"].(string)
-					owner := item["owned_by"].(string)
-					sb.WriteString(fmt.Sprintf("- `%s` (%s)\n", id, owner))
+				systemHeader := fmt.Sprintf("# Victor AI Chatbot [%s]\n*Chat history reset. Press Ctrl+S to send. Press Ctrl+C to quit.*\n\n---\n", m.modelName)
+				m.history = systemHeader
+				m.renderedHistory = m.renderMarkdown(systemHeader)
+				m.messages = []openai.ChatCompletionMessage{
+					{
+						Role:    "system",
+						Content: "You are an expert developer assistant. Provide precise, idiomatic code examples and direct technical answers.",
+					},
 				}
-				sb.WriteString("\n*Type `/model <name>` or press `Ctrl+M` to switch models.*\n\n---\n")
-				m.history += sb.String()
-				m.updateViewport()
-				return m, nil
-			}
-
-			if strings.HasPrefix(input, "/model ") || strings.HasPrefix(input, "/use ") {
-				m.textarea.Reset()
-				target := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(input, "/model "), "/use "))
-				prov, targetModel, err := m.registry.ResolveProvider(target)
-				if err != nil {
-					m.copyStatus = "Failed to switch model: " + err.Error()
-					return m, nil
-				}
-				m.prov = prov
-				m.modelName = targetModel
-				m.copyStatus = fmt.Sprintf("Switched active model to: %s", targetModel)
-				m.history += fmt.Sprintf("*Switched active model to **%s***\n\n---\n", targetModel)
-				m.updateViewport()
+				m.currentAi = ""
+				m.lastAiResponse = ""
+				m.copyStatus = "Conversation history cleared."
+				m.updateViewport(false)
 				return m, nil
 			}
 
 			m.textarea.Reset()
-			m.history += fmt.Sprintf("**You:** %s\n\n", input)
+			userTurnMd := fmt.Sprintf("**You:** %s\n\n", input)
+			m.history += userTurnMd
+			m.renderedHistory += m.renderMarkdown(userTurnMd)
 			m.currentAi = ""
 			m.isWaiting = true
 			m.copyStatus = ""
-			m.updateViewport()
+
+			// Append user message to conversation memory
+			m.messages = append(m.messages, openai.ChatCompletionMessage{
+				Role:    "user",
+				Content: input,
+			})
+
+			m.updateViewport(false)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			m.cancelFunc = cancel
 
 			return m, tea.Batch(
 				tiCmd,
 				m.spinner.Tick,
-				m.sendStreamCmd(input),
+				m.sendStreamCmd(ctx),
 			)
 		}
 	}
@@ -354,33 +349,43 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.textarea.SetWidth(msg.Width)
 
 		m.glamour = newRenderer(msg.Width - 4)
-		m.updateViewport()
-
-	case streamChunkMsg:
-		// Keep isWaiting true while chunks are arriving — cleared only on done/err.
-		m.currentAi += string(msg)
-		m.updateViewport()
+		m.renderedHistory = m.renderMarkdown(m.history)
+		m.updateViewport(false)
 
 	case streamStartMsg:
 		return m, receiveStreamCmd(msg.stream)
 
 	case streamChunkWithStreamMsg:
 		m.currentAi += msg.content
-		m.updateViewport()
+		// During streaming, update viewport fast without full markdown re-parsing
+		m.updateViewport(true)
 		return m, receiveStreamCmd(msg.stream)
 
 	case streamDoneMsg:
 		m.isWaiting = false
-		m.history += fmt.Sprintf("**Assistant:**\n%s\n\n---\n", m.currentAi)
+		m.cancelFunc = nil
+		aiTurnMd := fmt.Sprintf("**Assistant:**\n%s\n\n---\n", m.currentAi)
+		m.history += aiTurnMd
+		m.renderedHistory += m.renderMarkdown(aiTurnMd)
+
+		// Append assistant response to conversation memory
+		m.messages = append(m.messages, openai.ChatCompletionMessage{
+			Role:    "assistant",
+			Content: m.currentAi,
+		})
+
 		m.lastAiResponse = m.currentAi
 		m.currentAi = ""
-		m.updateViewport()
+		m.updateViewport(false)
 
 	case streamErrMsg:
 		m.isWaiting = false
-		m.history += fmt.Sprintf("\n\n*Assistant: the request failed (%v); please try again.*\n\n---\n", msg.err)
+		m.cancelFunc = nil
+		errMd := fmt.Sprintf("\n\n*Assistant error: %v*\n\n---\n", msg.err)
+		m.history += errMd
+		m.renderedHistory += m.renderMarkdown(errMd)
 		m.currentAi = ""
-		m.updateViewport()
+		m.updateViewport(false)
 	}
 
 	return m, tea.Batch(tiCmd, vpCmd, spCmd)
@@ -407,65 +412,32 @@ func (m model) View() string {
 	)
 }
 
-func (m *model) updateViewport() {
-	fullText := m.history
-	if m.currentAi != "" {
-		fullText += fmt.Sprintf("**Assistant:**\n%s", m.currentAi)
-	}
-
-	if m.glamour == nil {
-		m.viewport.SetContent(fullText)
-		m.viewport.GotoBottom()
-		return
-	}
-
-	rendered, err := m.glamour.Render(fullText)
-	if err != nil {
-		m.viewport.SetContent(fullText)
+// updateViewport updates viewport content. During streaming, it avoids re-parsing
+// the full document through Glamour on every token, guaranteeing ultra-fast streaming.
+func (m *model) updateViewport(isStreaming bool) {
+	if isStreaming {
+		content := m.renderedHistory + fmt.Sprintf("\n**Assistant:**\n%s", m.currentAi)
+		m.viewport.SetContent(content)
 	} else {
-		m.viewport.SetContent(rendered)
+		m.viewport.SetContent(m.renderedHistory)
 	}
 	m.viewport.GotoBottom()
 }
 
-// sendStreamCmd opens the provider stream. Chunks are received individually so
-// the TUI can render them as they arrive.
-func (m model) sendStreamCmd(input string) tea.Cmd {
+func (m model) sendStreamCmd(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
-
-		// Build openai-compatible request
 		openReq := openai.ChatCompletionRequest{
-			Model: m.modelName,
-			Messages: []openai.ChatCompletionMessage{
-				{Role: "system", Content: "You are an expert developer assistant. Provide precise, idiomatic code examples and direct technical answers."},
-				{Role: "user", Content: input},
-			},
-			MaxCompletionTokens: 512,
-			ReasoningEffort:     "none",
-			Stream:              true,
+			Model:    m.modelName,
+			Messages: m.messages,
+			Stream:   true,
 		}
 
 		if m.prov != nil {
-			if provider.IsDeepSeekV4Flash(openReq.Model) {
-				openReq.Stream = false
-				resp, err := m.prov.CreateChatCompletion(ctx, openReq)
-				if err != nil {
-					return streamErrMsg{err: err}
-				}
-				var text string
-				if len(resp.Choices) > 0 {
-					text = resp.Choices[0].Content
-				}
-				return tea.Sequence(
-					func() tea.Msg { return streamChunkMsg(text) },
-					func() tea.Msg { return streamDoneMsg{} },
-				)()
-			}
 			stream, err := m.prov.CreateChatCompletionStream(ctx, openReq)
 			if err != nil {
-				// If provider doesn't support streaming, fall back to non-streaming call and emit full text
+				// Fall back to non-streaming if provider does not support it
 				if err == provider.ErrNotSupported {
+					openReq.Stream = false
 					resp, err2 := m.prov.CreateChatCompletion(ctx, openReq)
 					if err2 != nil {
 						return streamErrMsg{err: err2}
@@ -475,7 +447,7 @@ func (m model) sendStreamCmd(input string) tea.Cmd {
 						text = resp.Choices[0].Content
 					}
 					return tea.Sequence(
-						func() tea.Msg { return streamChunkMsg(text) },
+						func() tea.Msg { return streamChunkWithStreamMsg{content: text, stream: nil} },
 						func() tea.Msg { return streamDoneMsg{} },
 					)()
 				}
@@ -484,16 +456,14 @@ func (m model) sendStreamCmd(input string) tea.Cmd {
 			return streamStartMsg{stream: stream}
 		}
 
-		// No provider: simple local echo
-		cmds := []tea.Cmd{
-			func() tea.Msg { return streamChunkMsg("(no provider) " + input) },
-			func() tea.Msg { return streamDoneMsg{} },
-		}
-		return tea.Sequence(cmds...)()
+		return streamErrMsg{err: fmt.Errorf("no provider initialized")}
 	}
 }
 
 func receiveStreamCmd(stream provider.Stream) tea.Cmd {
+	if stream == nil {
+		return func() tea.Msg { return streamDoneMsg{} }
+	}
 	return func() tea.Msg {
 		chunk, err := stream.Recv()
 		if err != nil {
@@ -508,37 +478,36 @@ func receiveStreamCmd(stream provider.Stream) tea.Cmd {
 }
 
 func main() {
-	// Load environment variables from .env file if it exists
 	_ = godotenv.Load()
 
-	modelFlag := flag.String("model", "", "Model to use ('deepseek-v4-flash', 'gemini', 'groq', 'nvidia', or specific model name)")
+	modelFlag := flag.String("model", "", "Model name override")
 	serverFlag := flag.Bool("api", false, "Start HTTP API server (don't run TUI)")
-	apiAddr := flag.String("api-addr", ":8080", "Address for the HTTP API server (when --api is set)")
+	apiAddr := flag.String("api-addr", ":8080", "Address for the HTTP API server")
 	flag.Parse()
 
-	if *serverFlag {
-		// Start HTTP API server and exit
-		startServer(*apiAddr)
-		return
-	}
-
-	reg := NewProviderRegistry()
-	if len(reg.providers) == 0 {
-		log.Fatal("no AI providers configured: set DEEPSEEK_API_KEY, GEMINI_API_KEY/GOOGLE_API_KEY, GROQ_API_KEY, or NVIDIA_API_KEY in .env")
+	prov, err := provider.NewClientFromEnv()
+	if err != nil {
+		log.Fatalf("failed to initialize LLM provider: %v", err)
 	}
 
 	selectedModel := *modelFlag
 	if selectedModel == "" {
-		selectedModel = os.Getenv("CHAT_MODEL")
+		selectedModel = prov.ModelName()
+	}
+
+	if *serverFlag {
+		startServer(*apiAddr, prov)
+		return
 	}
 
 	p := tea.NewProgram(
-		initialModel(reg, selectedModel),
-		tea.WithAltScreen(),       // Use full terminal buffer
-		tea.WithMouseCellMotion(), // Allow mouse scroll
+		initialModel(prov, selectedModel),
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 	)
 
 	if _, err := p.Run(); err != nil {
 		log.Fatalf("Error running program: %v", err)
 	}
 }
+
