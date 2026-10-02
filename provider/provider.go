@@ -64,6 +64,22 @@ type Client struct {
 	baseURL string
 }
 
+func normalizeModel(m string, baseURL string) string {
+	m = strings.TrimSpace(m)
+	if m == "" {
+		if strings.Contains(baseURL, "nvidia.com") {
+			return "nvidia/nemotron-3.5-lightning-30b-a3b"
+		}
+		return "nvidia/nemotron-3.5-lightning-30b-a3b"
+	}
+	if strings.Contains(baseURL, "nvidia.com") || strings.HasPrefix(m, "nemotron") {
+		if !strings.HasPrefix(m, "nvidia/") && strings.HasPrefix(m, "nemotron") {
+			return "nvidia/" + m
+		}
+	}
+	return m
+}
+
 // NewClient creates a new unified LLM client from the given config.
 func NewClient(cfg Config) (*Client, error) {
 	if cfg.APIKey == "" {
@@ -85,9 +101,11 @@ func NewClient(cfg Config) (*Client, error) {
 		Timeout: timeout,
 	}
 
+	model := normalizeModel(cfg.Model, clientCfg.BaseURL)
+
 	return &Client{
 		client:  openai.NewClientWithConfig(clientCfg),
-		model:   cfg.Model,
+		model:   model,
 		baseURL: clientCfg.BaseURL,
 	}, nil
 }
@@ -99,23 +117,27 @@ func NewClientFromEnv() (*Client, error) {
 	baseURL := os.Getenv("LLM_BASE_URL")
 	model := os.Getenv("LLM_MODEL")
 
-	// Fallback to legacy env variables if LLM_* is not set
+	if chatModel := os.Getenv("CHAT_MODEL"); chatModel != "" {
+		model = chatModel
+	}
+
+	// Fallback to provider-specific env variables if LLM_* is not set
 	if apiKey == "" {
-		if k := os.Getenv("GROQ_API_KEY"); k != "" {
+		if k := os.Getenv("NVIDIA_API_KEY"); k != "" {
+			apiKey = k
+			if baseURL == "" {
+				baseURL = "https://integrate.api.nvidia.com/v1"
+			}
+			if model == "" {
+				model = "nvidia/nemotron-3.5-lightning-30b-a3b"
+			}
+		} else if k := os.Getenv("GROQ_API_KEY"); k != "" {
 			apiKey = k
 			if baseURL == "" {
 				baseURL = "https://api.groq.com/openai/v1"
 			}
 			if model == "" {
 				model = "llama-3.3-70b-versatile"
-			}
-		} else if k := os.Getenv("NVIDIA_API_KEY"); k != "" {
-			apiKey = k
-			if baseURL == "" {
-				baseURL = "https://integrate.api.nvidia.com/v1"
-			}
-			if model == "" {
-				model = "deepseek-ai/deepseek-v4.1-flash"
 			}
 		} else if k := os.Getenv("OPENAI_API_KEY"); k != "" {
 			apiKey = k
@@ -125,12 +147,15 @@ func NewClientFromEnv() (*Client, error) {
 		}
 	}
 
-	if chatModel := os.Getenv("CHAT_MODEL"); chatModel != "" {
-		model = chatModel
+	if baseURL == "" && (strings.HasPrefix(apiKey, "nvapi-") || os.Getenv("NVIDIA_API_KEY") != "") {
+		baseURL = "https://integrate.api.nvidia.com/v1"
+	}
+	if model == "" && strings.Contains(baseURL, "nvidia.com") {
+		model = "nvidia/nemotron-3.5-lightning-30b-a3b"
 	}
 
 	if apiKey == "" {
-		return nil, fmt.Errorf("no LLM API key configured (set LLM_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY, or OPENAI_API_KEY)")
+		return nil, fmt.Errorf("no LLM API key configured (set LLM_API_KEY or NVIDIA_API_KEY)")
 	}
 
 	return NewClient(Config{
