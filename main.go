@@ -482,7 +482,7 @@ func main() {
 
 	modelFlag := flag.String("model", "", "Model name override")
 	serverFlag := flag.Bool("api", false, "Start HTTP API server (don't run TUI)")
-	apiAddr := flag.String("api-addr", ":8080", "Address for the HTTP API server")
+	apiAddr := flag.String("api-addr", "", "Address for the HTTP API server (defaults to $PORT or :8080)")
 	flag.Parse()
 
 	prov, err := provider.NewClientFromEnv()
