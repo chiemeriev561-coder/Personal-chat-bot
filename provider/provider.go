@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,8 +65,31 @@ type Client struct {
 	baseURL string
 }
 
+func cleanEnv(val string) string {
+	val = strings.TrimSpace(val)
+	// Render environment variables are sometimes entered with shell/YAML
+	// quoting. Those quotes are not part of the URL and must not be passed to
+	// net/http (a URL beginning with a quote is parsed as a relative path).
+	for i := 0; i < 2; i++ {
+		if len(val) >= 2 && ((val[0] == '"' && val[len(val)-1] == '"') ||
+			(val[0] == '\'' && val[len(val)-1] == '\'')) {
+			if unquoted, err := strconv.Unquote(val); err == nil {
+				val = unquoted
+			} else {
+				val = val[1 : len(val)-1]
+			}
+		} else if strings.HasPrefix(val, `\"`) && strings.HasSuffix(val, `\"`) {
+			val = strings.TrimSuffix(strings.TrimPrefix(val, `\"`), `\"`)
+		} else {
+			break
+		}
+		val = strings.TrimSpace(val)
+	}
+	return strings.TrimSpace(val)
+}
+
 func normalizeModel(m string, baseURL string) string {
-	m = strings.TrimSpace(m)
+	m = cleanEnv(m)
 	if m == "" {
 		if strings.Contains(baseURL, "nvidia.com") {
 			return "nvidia/nemotron-3.5-lightning-30b-a3b"
@@ -82,13 +106,15 @@ func normalizeModel(m string, baseURL string) string {
 
 // NewClient creates a new unified LLM client from the given config.
 func NewClient(cfg Config) (*Client, error) {
-	if cfg.APIKey == "" {
+	apiKey := cleanEnv(cfg.APIKey)
+	if apiKey == "" {
 		return nil, errors.New("API key is required")
 	}
 
-	clientCfg := openai.DefaultConfig(cfg.APIKey)
-	if cfg.BaseURL != "" {
-		base := strings.TrimRight(cfg.BaseURL, "/")
+	baseURL := cleanEnv(cfg.BaseURL)
+	clientCfg := openai.DefaultConfig(apiKey)
+	if baseURL != "" {
+		base := strings.TrimRight(baseURL, "/")
 		base = strings.TrimSuffix(base, "/chat/completions")
 		clientCfg.BaseURL = base
 	}
@@ -113,17 +139,17 @@ func NewClient(cfg Config) (*Client, error) {
 // NewClientFromEnv initializes the client from environment variables.
 // It checks standard LLM configuration keys with graceful fallbacks.
 func NewClientFromEnv() (*Client, error) {
-	apiKey := os.Getenv("LLM_API_KEY")
-	baseURL := os.Getenv("LLM_BASE_URL")
-	model := os.Getenv("LLM_MODEL")
+	apiKey := cleanEnv(os.Getenv("LLM_API_KEY"))
+	baseURL := cleanEnv(os.Getenv("LLM_BASE_URL"))
+	model := cleanEnv(os.Getenv("LLM_MODEL"))
 
-	if chatModel := os.Getenv("CHAT_MODEL"); chatModel != "" {
+	if chatModel := cleanEnv(os.Getenv("CHAT_MODEL")); chatModel != "" {
 		model = chatModel
 	}
 
 	// Fallback to provider-specific env variables if LLM_* is not set
 	if apiKey == "" {
-		if k := os.Getenv("NVIDIA_API_KEY"); k != "" {
+		if k := cleanEnv(os.Getenv("NVIDIA_API_KEY")); k != "" {
 			apiKey = k
 			if baseURL == "" {
 				baseURL = "https://integrate.api.nvidia.com/v1"
@@ -131,7 +157,7 @@ func NewClientFromEnv() (*Client, error) {
 			if model == "" {
 				model = "nvidia/nemotron-3.5-lightning-30b-a3b"
 			}
-		} else if k := os.Getenv("GROQ_API_KEY"); k != "" {
+		} else if k := cleanEnv(os.Getenv("GROQ_API_KEY")); k != "" {
 			apiKey = k
 			if baseURL == "" {
 				baseURL = "https://api.groq.com/openai/v1"
@@ -139,7 +165,7 @@ func NewClientFromEnv() (*Client, error) {
 			if model == "" {
 				model = "llama-3.3-70b-versatile"
 			}
-		} else if k := os.Getenv("OPENAI_API_KEY"); k != "" {
+		} else if k := cleanEnv(os.Getenv("OPENAI_API_KEY")); k != "" {
 			apiKey = k
 			if model == "" {
 				model = "gpt-4o-mini"
