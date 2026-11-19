@@ -116,12 +116,11 @@ func (m model) copyToClipboard(text string, successMsg string) model {
 	}
 
 	err := clipboard.WriteAll(text)
-	seq := osc52.New(text)
-	fmt.Print(seq.String())
-
 	if err != nil {
-		fileErr := os.WriteFile("last_response.txt", []byte(text), 0644)
-		if fileErr != nil {
+		// Clipboard utility failed; try OSC52 fallback
+		seq := osc52.New(text)
+		fmt.Print(seq.String())
+		if err2 := os.WriteFile("last_response.txt", []byte(text), 0644); err2 != nil {
 			m.copyStatus = "Failed to copy: " + err.Error() + " (failed to write last_response.txt)"
 		} else {
 			m.copyStatus = "Clipboard util missing. Copied via OSC52 & saved to last_response.txt!"
@@ -488,7 +487,9 @@ func receiveStreamCmd(stream provider.Stream) tea.Cmd {
 }
 
 func main() {
-	_ = godotenv.Load()
+	if err := godotenv.Load(); err != nil {
+		log.Printf("Warning: could not load .env file: %v", err)
+	}
 
 	modelFlag := flag.String("model", "", "Model name override")
 	serverFlag := flag.Bool("api", false, "Start HTTP API server (don't run TUI)")
