@@ -1,12 +1,14 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -64,11 +66,33 @@ func NewHistoryStore(file string) *HistoryStore {
 func (hs *HistoryStore) Save() error {
 	hs.mu.Lock()
 	defer hs.mu.Unlock()
+	return hs.saveLocked()
+}
+
+func (hs *HistoryStore) saveLocked() error {
 	b, err := json.MarshalIndent(hs.data, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(hs.file, b, 0644)
+	dir := filepath.Dir(hs.file)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(hs.file)+"-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, hs.file)
 }
 
 func (hs *HistoryStore) Get(session string) []ChatMessage {
@@ -79,9 +103,9 @@ func (hs *HistoryStore) Get(session string) []ChatMessage {
 
 func (hs *HistoryStore) Append(session string, msg ChatMessage) error {
 	hs.mu.Lock()
+	defer hs.mu.Unlock()
 	hs.data[session] = append(hs.data[session], msg)
-	hs.mu.Unlock()
-	return hs.Save()
+	return hs.saveLocked()
 }
 
 var store = NewHistoryStore("history.json")
@@ -97,7 +121,7 @@ func withCORS(next http.HandlerFunc) http.HandlerFunc {
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Access-Control-Allow-Credentials", "false")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -117,7 +141,8 @@ func requireAuth(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	auth := r.Header.Get("Authorization")
-	if auth != "Bearer "+token {
+	expected := "Bearer " + token
+	if subtle.ConstantTimeCompare([]byte(auth), []byte(expected)) != 1 {
 		writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 		return false
 	}
@@ -173,6 +198,7 @@ func startServer(addr string, prov provider.Provider) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(msgs)
 		case http.MethodPost:
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 			var p struct {
 				Session string      `json:"session"`
 				Message ChatMessage `json:"message"`
@@ -181,7 +207,10 @@ func startServer(addr string, prov provider.Provider) {
 				writeJSONError(w, http.StatusBadRequest, "invalid request body")
 				return
 			}
-			_ = store.Append(p.Session, p.Message)
+			if err := store.Append(p.Session, p.Message); err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "failed to persist history")
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		default:
@@ -200,6 +229,7 @@ func startServer(addr string, prov provider.Provider) {
 		}
 
 		var req ChatCompletionRequest
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 			return
@@ -334,6 +364,7 @@ func startServer(addr string, prov provider.Provider) {
 				msg = "Hello from Personal Chat Bot API."
 			}
 		} else if r.Method == http.MethodPost {
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 			if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
 				writeJSONError(w, http.StatusBadRequest, "invalid request body")
 				return
@@ -426,18 +457,24 @@ func startServer(addr string, prov provider.Provider) {
 	}))
 
 	addrToUse := ":8080"
-	if addr != "" {
-		addrToUse = addr
-	}
 	if port := os.Getenv("PORT"); port != "" {
 		addrToUse = ":" + port
 	}
 	if env := os.Getenv("API_ADDR"); env != "" {
 		addrToUse = env
 	}
+	if addr != "" {
+		addrToUse = addr
+	}
 
 	log.Printf("Starting HTTP API server on %s with model %s", addrToUse, prov.ModelName())
-	if err := http.ListenAndServe(addrToUse, mux); err != nil {
+	server := &http.Server{
+		Addr:              addrToUse,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatalf("API server failed: %v", err)
 	}
 }

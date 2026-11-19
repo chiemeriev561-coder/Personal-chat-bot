@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -202,7 +203,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.isWaiting {
 				m.textarea.InsertString(msg.String())
 			}
-			break
+			return m, nil
 		}
 
 		if !m.textarea.Focused() && !m.isWaiting {
@@ -346,6 +347,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		footerHeight := 8 // textarea (5 lines) + borders + padding + status line
 		m.viewport.Width = msg.Width
 		m.viewport.Height = msg.Height - headerHeight - footerHeight
+		if m.viewport.Height < 1 {
+			m.viewport.Height = 1
+		}
 		m.textarea.SetWidth(msg.Width)
 
 		m.glamour = newRenderer(msg.Width - 4)
@@ -362,6 +366,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, receiveStreamCmd(msg.stream)
 
 	case streamDoneMsg:
+		if !m.isWaiting {
+			return m, nil
+		}
 		m.isWaiting = false
 		m.cancelFunc = nil
 		aiTurnMd := fmt.Sprintf("**Assistant:**\n%s\n\n---\n", m.currentAi)
@@ -379,6 +386,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateViewport(false)
 
 	case streamErrMsg:
+		if !m.isWaiting || errors.Is(msg.err, context.Canceled) {
+			return m, nil
+		}
 		m.isWaiting = false
 		m.cancelFunc = nil
 		errMd := fmt.Sprintf("\n\n*Assistant error: %v*\n\n---\n", msg.err)
@@ -510,4 +520,3 @@ func main() {
 		log.Fatalf("Error running program: %v", err)
 	}
 }
-

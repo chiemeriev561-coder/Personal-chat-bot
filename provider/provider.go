@@ -218,9 +218,6 @@ func (c *Client) CreateChatCompletion(ctx context.Context, req openai.ChatComple
 
 	for i, ch := range resp.Choices {
 		content := ch.Message.Content
-		if content == "" && ch.Message.ReasoningContent != "" {
-			content = ch.Message.ReasoningContent
-		}
 		out.Choices = append(out.Choices, Choice{
 			Index:        i,
 			Role:         ch.Message.Role,
@@ -246,8 +243,6 @@ func (w *openAIStreamWrapper) Recv() (StreamChunk, error) {
 	for _, ch := range resp.Choices {
 		if ch.Delta.Content != "" {
 			combined += ch.Delta.Content
-		} else if ch.Delta.ReasoningContent != "" {
-			combined += ch.Delta.ReasoningContent
 		}
 	}
 	return StreamChunk{Content: combined}, nil
